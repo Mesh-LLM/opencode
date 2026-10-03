@@ -531,25 +531,15 @@ describe("Anthropic Messages route", () => {
     }),
   )
 
-  it.effect("keeps a terminal Vertex system update in the tool-result turn", () =>
+  it.effect("sends Vertex system updates after local tool results as native system messages", () =>
     Effect.gen(function* () {
-      const prepared = yield* compileRequest(
-        LLM.request({
-          model: vertexOpus48,
-          messages: [
-            Message.assistant([ToolCallPart.make({ id: "call_1", name: "lookup", input: {} })]),
-            Message.tool({ id: "call_1", name: "lookup", result: "Done." }),
-            Message.system("Operator update."),
-          ],
-          cache: "none",
-        }),
-      )
-
-      expect(prepared.body.messages).toEqual([
-        {
-          role: "assistant",
-          content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }],
-        },
+      const toolTurn = [
+        Message.assistant([ToolCallPart.make({ id: "call_1", name: "lookup", input: {} })]),
+        Message.tool({ id: "call_1", name: "lookup", result: "Done." }),
+        Message.system("Operator update."),
+      ]
+      const lowered = [
+        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
         {
           role: "user",
           content: [
@@ -560,55 +550,23 @@ describe("Anthropic Messages route", () => {
               is_error: undefined,
               cache_control: undefined,
             },
-            {
-              type: "text",
-              text: "<system-update>\nOperator update.\n</system-update>",
-              cache_control: undefined,
-            },
           ],
         },
-      ])
-    }),
-  )
+        { role: "system", content: [{ type: "text", text: "Operator update.", cache_control: undefined }] },
+      ]
 
-  it.effect("preserves folded tool-result system updates across multi-turn Vertex history", () =>
-    Effect.gen(function* () {
-      const prepared = yield* compileRequest(
+      const terminal = yield* compileRequest(LLM.request({ model: vertexOpus48, messages: toolTurn, cache: "none" }))
+      const history = yield* compileRequest(
         LLM.request({
           model: vertexOpus48,
-          messages: [
-            Message.assistant([ToolCallPart.make({ id: "call_1", name: "lookup", input: {} })]),
-            Message.tool({ id: "call_1", name: "lookup", result: "Done." }),
-            Message.system("Operator update."),
-            Message.assistant("Acknowledged."),
-            Message.user("Next step."),
-          ],
+          messages: [...toolTurn, Message.assistant("Acknowledged."), Message.user("Next step.")],
           cache: "none",
         }),
       )
 
-      expect(prepared.body.messages).toEqual([
-        {
-          role: "assistant",
-          content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }],
-        },
-        {
-          role: "user",
-          content: [
-            {
-              type: "tool_result",
-              tool_use_id: "call_1",
-              content: '"Done."',
-              is_error: undefined,
-              cache_control: undefined,
-            },
-            {
-              type: "text",
-              text: "<system-update>\nOperator update.\n</system-update>",
-              cache_control: undefined,
-            },
-          ],
-        },
+      expect(terminal.body.messages).toEqual(lowered)
+      expect(history.body.messages).toEqual([
+        ...lowered,
         { role: "assistant", content: [{ type: "text", text: "Acknowledged." }] },
         { role: "user", content: [{ type: "text", text: "Next step." }] },
       ])
