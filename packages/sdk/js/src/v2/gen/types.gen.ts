@@ -1744,6 +1744,8 @@ export type ProviderConfig = {
   options?: {
     apiKey?: string
     baseURL?: string
+    dynamicModels?: boolean
+    modelsURL?: string
     enterpriseUrl?: string
     setCacheKey?: boolean
     /**

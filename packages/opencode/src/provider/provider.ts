@@ -18,7 +18,7 @@ import { iife } from "@/util/iife"
 import { Global } from "@opencode-ai/core/global"
 import path from "path"
 import { pathToFileURL } from "url"
-import { Effect, Layer, Context, Schema, Types } from "effect"
+import { Effect, Layer, Context, Option, Schema, Types } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { EffectPromise } from "@/effect/promise"
@@ -26,6 +26,7 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
 import { isRecord } from "@/util/record"
 import { optional } from "@opencode-ai/core/schema"
 import { ProviderTransform } from "./transform"
+import { MeshProvider } from "./mesh"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ModelStatus } from "./model-status"
@@ -190,6 +191,90 @@ type CustomDep = {
   config: () => Effect.Effect<ConfigV1.Info>
   env: () => Effect.Effect<Record<string, string | undefined>>
   get: (key: string) => Effect.Effect<string | undefined>
+}
+
+const DYNAMIC_MODELS_TIMEOUT_MS = 10_000
+
+const DynamicModelResponse = Schema.Struct({
+  data: Schema.mutable(Schema.Array(Schema.Struct({ id: Schema.String }))),
+})
+
+type DiscoveryProblem = {
+  message: string
+  fields: Record<string, unknown>
+}
+
+type DiscoveryResult = {
+  models: string[]
+  problem?: DiscoveryProblem
+}
+
+/**
+ * Discover model ids from a provider's OpenAI-compatible `/models` endpoint.
+ *
+ * Enabled per provider with `options.dynamicModels`; the endpoint defaults to
+ * `<baseURL>/models` and `options.modelsURL` overrides it. Discovery never
+ * throws: a missing base URL, an unreachable endpoint, or an unexpected payload
+ * is reported back to the caller instead.
+ */
+async function dynamicModels(
+  providerID: string,
+  provider: MeshProvider.ConfigProvider,
+  env: Record<string, string | undefined>,
+): Promise<DiscoveryResult> {
+  const options = provider.options ?? {}
+  if (options["dynamicModels"] !== true) return { models: [] }
+
+  const baseURL =
+    typeof options["baseURL"] === "string" && options["baseURL"] !== "" ? options["baseURL"] : provider.api
+  if (!baseURL) {
+    return {
+      models: [],
+      problem: { message: "skipping dynamic model discovery because base URL is missing", fields: { providerID } },
+    }
+  }
+
+  const headers = new Headers()
+  if (isRecord(options["headers"])) {
+    for (const [key, value] of Object.entries(options["headers"])) {
+      if (typeof value === "string") headers.set(key, value)
+    }
+  }
+  const apiKey =
+    typeof options["apiKey"] === "string" && options["apiKey"] !== ""
+      ? options["apiKey"]
+      : provider.env
+          ?.map((name) => env[name])
+          .find((value): value is string => typeof value === "string" && value !== "")
+  if (apiKey && !headers.has("authorization")) headers.set("Authorization", `Bearer ${apiKey}`)
+
+  const endpoint =
+    typeof options["modelsURL"] === "string" && options["modelsURL"] !== ""
+      ? options["modelsURL"]
+      : `${baseURL.replace(/\/$/, "")}/models`
+
+  const response = await fetch(endpoint, { headers, signal: AbortSignal.timeout(DYNAMIC_MODELS_TIMEOUT_MS) }).catch(
+    () => undefined,
+  )
+  if (!response?.ok) {
+    return {
+      models: [],
+      problem: {
+        message: "dynamic model discovery failed",
+        fields: { providerID, endpoint, status: response?.status },
+      },
+    }
+  }
+
+  const payload = await response.json().catch(() => undefined)
+  const decoded = Schema.decodeUnknownOption(DynamicModelResponse)(payload)
+  if (Option.isNone(decoded)) {
+    return {
+      models: [],
+      problem: { message: "dynamic model discovery returned unexpected shape", fields: { providerID, endpoint } },
+    }
+  }
+  return { models: [...new Set(decoded.value.data.map((item) => item.id))] }
 }
 
 function selectAzureLanguageModel(sdk: any, modelID: string, useChat: boolean) {
@@ -1491,8 +1576,22 @@ const layer = Layer.effect(
         // load plugins first so config() hook runs before reading cfg.provider
         const plugins = yield* plugin.list()
 
+        const envs = yield* env.all()
+
+        // Fork: seed the Mesh provider beneath the user's config so a locally
+        // running mesh endpoint is usable with no configuration at all. An
+        // explicit `provider["mesh-llm"]` block always wins, and a seeded entry
+        // that discovers nothing is dropped (see provider/mesh.ts).
+        const meshSeeded = new Set<string>()
+        const configuredProviders: Record<string, MeshProvider.ConfigProvider> = { ...cfg.provider }
+        const meshDefault = MeshProvider.providerConfig(envs)
+        if (meshDefault && configuredProviders[MeshProvider.ID] === undefined) {
+          configuredProviders[MeshProvider.ID] = meshDefault
+          meshSeeded.add(MeshProvider.ID)
+        }
+
         // now read config providers - includes any modifications from plugin config() hook
-        const configProviders = Object.entries(cfg.provider ?? {})
+        const configProviders = Object.entries(configuredProviders)
         const disabled = new Set(cfg.disabled_providers ?? [])
         const enabled = cfg.enabled_providers ? new Set(cfg.enabled_providers) : null
 
@@ -1541,7 +1640,18 @@ const layer = Layer.effect(
             models: existing?.models ?? {},
           }
 
-          for (const [modelID, model] of Object.entries(provider.models ?? {})) {
+          const models: Record<string, MeshProvider.ConfigProviderModel> = { ...provider.models }
+          const seededProvider = meshSeeded.has(providerID)
+          const discovered = yield* Effect.promise(() => dynamicModels(providerID, provider, envs))
+          if (discovered.problem && !seededProvider) {
+            yield* Effect.logWarning(discovered.problem.message, discovered.problem.fields)
+          }
+          for (const modelID of discovered.models) {
+            if (models[modelID]) continue
+            models[modelID] = seededProvider ? MeshProvider.discoveredModel() : {}
+          }
+
+          for (const [modelID, model] of Object.entries(models)) {
             const existingModel = parsed.models[model.id ?? modelID]
             const apiID = model.id ?? existingModel?.api.id ?? modelID
             const apiNpm =
@@ -1631,7 +1741,6 @@ const layer = Layer.effect(
         }
 
         // load env
-        const envs = yield* env.all()
         for (const [id, provider] of Object.entries(database)) {
           const providerID = ProviderV2.ID.make(id)
           if (disabled.has(providerID)) continue
