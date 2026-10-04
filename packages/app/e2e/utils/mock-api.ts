@@ -1,4 +1,4 @@
-import { Schema, SchemaGetter } from "effect"
+import { Predicate, Schema, SchemaGetter } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiSchema } from "effect/unstable/httpapi"
 import { Pty } from "@opencode/schema/pty"
 import { Worktree } from "@opencode/schema/worktree"
@@ -10,7 +10,9 @@ const Json = Schema.Json.pipe(
   }),
   HttpApiSchema.asJson(),
 )
+
 const JsonPayload = Schema.Unknown.pipe(HttpApiSchema.asJson())
+
 const Query = Schema.Struct({
   directory: Schema.optional(Schema.String),
   parentID: Schema.optional(Schema.String),
@@ -23,8 +25,11 @@ const Query = Schema.Struct({
   type: Schema.optional(Schema.String),
   mode: Schema.optional(Schema.String),
 })
+
 const SessionParams = { sessionID: Schema.String }
+
 const PtyParams = { ptyID: Pty.ID }
+
 const NoContent = HttpApiSchema.NoContent
 
 export class MockNotFound extends Schema.TaggedError<MockNotFound>()("MockNotFound", {
@@ -49,6 +54,7 @@ export class MockShellNotFound extends Schema.TaggedError<MockShellNotFound>()("
 export class MockUnsupported extends Schema.TaggedError<MockUnsupported>()("MockUnsupported", {
   message: Schema.String,
 }) {}
+
 const Unsupported = MockUnsupported.pipe(HttpApiSchema.status(501))
 
 const Group = HttpApiGroup.make("mock")
@@ -410,11 +416,17 @@ const Group = HttpApiGroup.make("mock")
 
 export const MockApi = HttpApi.make("mock").add(Group)
 
+// SAFETY: handlers answer fixture data of any kind; this encoder is the boundary that turns it into JSON.
+// oxlint-disable-next-line anti-slop/no-unknown-parameters -- see SAFETY above
 function jsonValue(value: unknown): Schema.Json {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value
-  if (typeof value === "number") return Number.isFinite(value) ? value : null
+  if (value === null || Predicate.isString(value) || Predicate.isBoolean(value)) return value
+
+  if (Predicate.isNumber(value)) return Number.isFinite(value) ? value : null
+
   if (Array.isArray(value)) return value.map(jsonValue)
-  if (!value || typeof value !== "object") return null
+
+  if (!Predicate.isObject(value)) return null
+
   return Object.fromEntries(
     Object.entries(value).flatMap(([key, item]) => (item === undefined ? [] : [[key, jsonValue(item)]])),
   )
