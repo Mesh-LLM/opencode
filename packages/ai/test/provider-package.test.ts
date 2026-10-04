@@ -30,6 +30,7 @@ describe("provider package entrypoints", () => {
       import("@opencode/ai/providers/xai"),
       import("@opencode/ai/providers/amazon-bedrock/mantle"),
       import("@opencode/ai/providers/amazon-bedrock/mantle/chat"),
+      import("@opencode/ai/providers/amazon-bedrock/mantle/messages"),
       import("@opencode/ai/providers/amazon-bedrock/mantle/responses"),
       import("@opencode/ai/providers/togetherai"),
       import("@opencode/ai/providers/cerebras"),
@@ -64,8 +65,9 @@ describe("provider package entrypoints", () => {
     expect(modules[0].model).toBe(modules[1].model)
     expect(modules[8].model).toBe(modules[9].model)
     expect(modules[12].model).toBe(modules[13].model)
-    expect(modules[19].model).toBe(modules[21].model)
+    expect(modules[19].model).toBe(modules[22].model)
     expect(modules[19].model).not.toBe(modules[20].model)
+    expect(modules[19].model).not.toBe(modules[21].model)
   })
 
   test("maps Alibaba API entrypoints onto explicit regional routes", async () => {

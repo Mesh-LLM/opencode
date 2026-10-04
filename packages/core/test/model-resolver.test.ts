@@ -208,6 +208,13 @@ describe("ModelResolver", () => {
         }),
         credential,
       )
+      const messages = yield* ModelResolver.fromCatalogModel(
+        model(Provider.aisdk("@ai-sdk/amazon-bedrock/mantle"), {
+          modelID: "anthropic.claude-opus-4-8",
+          settings: { region: "us-east-2" },
+        }),
+        credential,
+      )
 
       expect(responses.route).toMatchObject({
         id: "bedrock-mantle-responses",
@@ -216,6 +223,10 @@ describe("ModelResolver", () => {
       expect(chat.route).toMatchObject({
         id: "bedrock-mantle-chat",
         endpoint: { baseURL: "https://bedrock-mantle.us-east-2.api.aws/v1" },
+      })
+      expect(messages.route).toMatchObject({
+        id: "bedrock-mantle-messages",
+        endpoint: { baseURL: "https://bedrock-mantle.us-east-2.api.aws/anthropic/v1" },
       })
     }),
   )

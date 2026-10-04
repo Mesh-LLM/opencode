@@ -118,6 +118,7 @@ const NATIVE = new Set([
   "@opencode/ai/providers/azure/chat",
   "@opencode/ai/providers/amazon-bedrock/mantle",
   "@opencode/ai/providers/amazon-bedrock/mantle/chat",
+  "@opencode/ai/providers/amazon-bedrock/mantle/messages",
   "@opencode/ai/providers/amazon-bedrock/mantle/responses",
 ])
 
@@ -132,6 +133,8 @@ export function native(npm: string, context: Context & { readonly settings?: Pro
 
 const mantle = (modelID: string | undefined) => {
   if (modelID === undefined) return "@opencode/ai/providers/amazon-bedrock/mantle"
+  if (modelID.includes("anthropic") || modelID.includes("claude"))
+    return "@opencode/ai/providers/amazon-bedrock/mantle/messages"
   return `@opencode/ai/providers/amazon-bedrock/mantle/${modelID.includes("gpt-oss") ? "chat" : "responses"}`
 }
 

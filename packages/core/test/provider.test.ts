@@ -5,6 +5,9 @@ import { Provider } from "@opencode/core/provider"
 describe("Provider", () => {
   test("loads bundled native provider entrypoints", async () => {
     const packages = [
+      "@opencode/ai/providers/amazon-bedrock/mantle/chat",
+      "@opencode/ai/providers/amazon-bedrock/mantle/messages",
+      "@opencode/ai/providers/amazon-bedrock/mantle/responses",
       "@opencode/ai/providers/baseten",
       "@opencode/ai/providers/cerebras",
       "@opencode/ai/providers/cloudflare-ai-gateway",

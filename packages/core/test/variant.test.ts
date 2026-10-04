@@ -38,6 +38,24 @@ test("spells Messages variants for each provider", () => {
     { id: "max", settings: { effort: "max", thinking: { type: "adaptive", display: "summarized" } } },
   ])
 
+  expect(
+    resolve(model("@opencode/ai/providers/amazon-bedrock/mantle/messages", "anthropic.claude-opus-4-8"), [
+      { type: "effort", values: ["low", "max"] },
+    ]),
+  ).toEqual([
+    { id: "low", settings: { effort: "low", thinking: { type: "adaptive", display: "summarized" } } },
+    { id: "max", settings: { effort: "max", thinking: { type: "adaptive", display: "summarized" } } },
+  ])
+
+  expect(
+    resolve(model("@opencode/ai/providers/amazon-bedrock/mantle/messages", "anthropic.claude-haiku-4-5", 64_000), [
+      { type: "budget_tokens", min: 1024 },
+    ]),
+  ).toEqual([
+    { id: "high", settings: { thinking: { type: "enabled", budgetTokens: 16_000 } } },
+    { id: "max", settings: { thinking: { type: "enabled", budgetTokens: 31_999 } } },
+  ])
+
   expect(resolve(model("@opencode/ai/providers/minimax/messages", "MiniMax-M3"), [{ type: "toggle" }])).toEqual([
     { id: "none", settings: { thinking: { type: "disabled" } } },
     { id: "thinking", settings: { thinking: { type: "adaptive" } } },

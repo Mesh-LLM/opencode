@@ -13,7 +13,7 @@ function map(
     headers?: Record<string, string>
     body?: Record<string, unknown>
   } = {
-    package: `aisdk:${packageName}`,
+    package: packageName.startsWith("@opencode/ai/") ? packageName : `aisdk:${packageName}`,
     settings: { ...settings },
   }
   AISDKNative.rewrite(target, { specifier: target.package, providerID, modelID })
@@ -333,6 +333,14 @@ describe("AISDKNative", () => {
     for (const modelID of ["openai.gpt-oss-safeguard-20b", "openai.gpt-oss-safeguard-120b"]) {
       expect(map("@ai-sdk/amazon-bedrock/mantle", settings, modelID)?.package).toBe(
         "@opencode/ai/providers/amazon-bedrock/mantle/chat",
+      )
+    }
+    for (const modelID of ["anthropic.claude-opus-4-8", "anthropic.claude-opus-5-5"]) {
+      expect(map("@ai-sdk/amazon-bedrock/mantle", { region: "us-east-1" }, modelID)?.package).toBe(
+        "@opencode/ai/providers/amazon-bedrock/mantle/messages",
+      )
+      expect(map("@opencode/ai/providers/amazon-bedrock/mantle", { region: "us-east-1" }, modelID)?.package).toBe(
+        "@opencode/ai/providers/amazon-bedrock/mantle/messages",
       )
     }
     expect(

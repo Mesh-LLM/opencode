@@ -7,6 +7,7 @@ import { AnthropicMessages } from "../src/protocols/anthropic-messages.js"
 import { OpenAIResponses } from "../src/protocols/openai-responses.js"
 import { Gemini } from "../src/protocols/gemini.js"
 import { GoogleVertexMessages, OpenAI } from "../src/providers.js"
+import { AmazonBedrockMantle } from "../src/providers/index.js"
 import { applyCachePolicy } from "../src/cache-policy.js"
 import { applyEffortUpdates } from "../src/effort-updates.js"
 import { it, testEffect } from "./lib/effect.js"
@@ -239,6 +240,31 @@ describe("Anthropic Messages effort updates", () => {
 
       expect(systemMessages(enabled.body)).toHaveLength(1)
       expect(systemMessages(disabled.body)).toHaveLength(0)
+    }),
+  )
+
+  it.effect("strips markers for Opus 5.0 on Bedrock Mantle Messages while lowering Opus 5.5", () =>
+    Effect.gen(function* () {
+      const mantle = AmazonBedrockMantle.configure({ apiKey: "test", region: "us-east-1" })
+      const opus50 = yield* compileRequest(
+        LLM.request({
+          model: mantle.messages("anthropic.claude-opus-5"),
+          messages: conversation,
+          providerOptions: { effort: "low" },
+        }),
+      )
+      const opus55 = yield* compileRequest(
+        LLM.request({
+          model: mantle.messages("anthropic.claude-opus-5-5"),
+          messages: conversation,
+          providerOptions: { effort: "low" },
+        }),
+      )
+
+      expect(systemMessages(opus50.body)).toHaveLength(0)
+      expect(opus50.body.output_config).toEqual({ effort: "low" })
+      expect(systemMessages(opus55.body)).toEqual([{ role: "system", content: [], output_config: { effort: "low" } }])
+      expect(opus55.body.output_config).toEqual({ effort: "high" })
     }),
   )
 

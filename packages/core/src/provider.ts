@@ -53,6 +53,10 @@ const builtins = new Map<string, () => Promise<unknown>>([
     () => import("@opencode/ai/providers/amazon-bedrock/mantle/chat"),
   ],
   [
+    "@opencode/ai/providers/amazon-bedrock/mantle/messages",
+    () => import("@opencode/ai/providers/amazon-bedrock/mantle/messages"),
+  ],
+  [
     "@opencode/ai/providers/amazon-bedrock/mantle/responses",
     () => import("@opencode/ai/providers/amazon-bedrock/mantle/responses"),
   ],
