@@ -134,10 +134,10 @@ export function createPluginContext(input: {
     input.owned.push(async () => unregister())
     return unregister
   }
-  let layers: Set<() => void> | undefined = new Set()
+  let cleanups: Set<() => void> | undefined = new Set()
   input.owned.push(async () => {
-    const active = layers
-    layers = undefined
+    const active = cleanups
+    cleanups = undefined
     active?.forEach((dispose) => dispose())
   })
   context = {
@@ -168,17 +168,17 @@ export function createPluginContext(input: {
       },
     },
     keymap: {
-      layer(layer) {
-        const active = layers
+      layer(factory) {
+        const active = cleanups
         if (!active) return
         // Validate outside Solid, whose error routing would bypass the caller.
-        Keymap.validateLayer(untrack(layer))
+        Keymap.validateCommands(untrack(factory).commands)
         const caller = getOwner()
         createRoot((dispose) => {
           active.add(dispose)
           onCleanup(() => active.delete(dispose))
           if (caller) runWithOwner(caller, () => onCleanup(dispose))
-          Keymap.createLayer(layer)
+          Keymap.createLayer(factory)
         }, caller ?? host.owner)
       },
       dispatch: host.keymap.dispatch,

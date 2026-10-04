@@ -444,7 +444,7 @@ export interface Keymap {
    * validation, then reactively. Initial command-shape errors throw synchronously. OpenTUI handles binding-parse errors.
    * Errors from later reactive updates follow Solid's error handling.
    */
-  layer(input: () => KeymapLayer): void
+  layer(factory: () => KeymapLayer): void
   /** Dispatches a reachable command by ID. */
   dispatch(id: string, input?: string): void
   /** Returns every formatted shortcut for a registered command. */

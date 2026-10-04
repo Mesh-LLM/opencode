@@ -407,7 +407,7 @@ export const Keymap = {
   Provider,
   use,
   createLayer,
-  validateLayer: (layer: KeymapLayer) => void groupCommands(layer.commands),
+  validateCommands: (commands?: readonly KeymapCommand[]) => void groupCommands(commands),
   useShortcuts,
   useShortcut,
   useLeaderActive,
