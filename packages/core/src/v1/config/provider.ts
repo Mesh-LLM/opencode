@@ -92,6 +92,12 @@ export const Info = Schema.Struct({
       Schema.Struct({
         apiKey: Schema.optional(Schema.String),
         baseURL: Schema.optional(Schema.String),
+        dynamicModels: Schema.optional(Schema.Boolean).annotate({
+          description: "Discover model IDs dynamically from an OpenAI-compatible /models endpoint",
+        }),
+        modelsURL: Schema.optional(Schema.String).annotate({
+          description: "Override the dynamic model discovery endpoint URL (defaults to <baseURL>/models)",
+        }),
         enterpriseUrl: Schema.optional(Schema.String).annotate({
           description: "GitHub Enterprise URL for copilot authentication",
         }),

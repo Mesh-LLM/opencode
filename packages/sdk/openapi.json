@@ -20750,6 +20750,12 @@
               "baseURL": {
                 "type": "string"
               },
+              "dynamicModels": {
+                "type": "boolean"
+              },
+              "modelsURL": {
+                "type": "string"
+              },
               "enterpriseUrl": {
                 "type": "string"
               },

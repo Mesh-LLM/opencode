@@ -1528,6 +1528,58 @@ In this example:
 
 ---
 
+### Mesh LLM
+
+OpenCode ships with a **Mesh LLM** provider, so a locally running [mesh-llm](https://meshllm.cloud) endpoint is usable with no configuration at all. Start a mesh node and its models appear in `/models`:
+
+```bash
+mesh-llm serve --auto
+```
+
+Mesh's OpenAI-compatible API listens on `http://127.0.0.1:9337/v1`, and OpenCode discovers the ids it serves from `/v1/models` on start. When no mesh is running the provider is simply absent, so nothing else changes.
+
+To use a mesh on another machine, point OpenCode at it with `MESH_LLM_BASE_URL`:
+
+```bash
+MESH_LLM_BASE_URL=http://other-host:9337/v1 opencode
+```
+
+:::note
+Setting `MESH_LLM_BASE_URL` to an empty string turns the built-in provider off.
+:::
+
+Declaring `mesh-llm` in `opencode.json` yourself always takes precedence over the built-in default:
+
+```json title="opencode.json" "mesh-llm" {5, 6, 8, 9}
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "mesh-llm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Mesh LLM",
+      "options": {
+        "baseURL": "http://127.0.0.1:9337/v1",
+        "apiKey": "dummy",
+        "dynamicModels": true
+      },
+      "models": {
+        "mesh": {
+          "name": "Mesh (automatic routing)",
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Mesh serves `"model": "mesh"` with whatever the mesh has available — a committee when that helps, a single suitable model otherwise. See [Automatic routing](https://meshllm.cloud/docs/pages/automatic-routing/).
+
+---
+
 ### Moonshot AI
 
 To use Kimi K2 from Moonshot AI:
@@ -2620,6 +2672,8 @@ You can use any OpenAI-compatible provider with opencode. Most modern AI provide
    - **options.baseURL**: API endpoint URL.
    - **options.apiKey**: Optionally set the API key, if not using auth.
    - **options.headers**: Optionally set custom headers.
+   - **options.dynamicModels**: Set to `true` to discover model IDs from the provider's OpenAI-compatible `/models` endpoint.
+   - **options.modelsURL**: Optionally override the discovery endpoint (defaults to `<baseURL>/models`).
 
    More on the advanced options in the example below.
 
@@ -2667,6 +2721,66 @@ Configuration details:
 - **limit.output**: Maximum tokens the model can generate.
 
 The `limit` fields allow OpenCode to understand how much context you have left. Standard providers pull these from models.dev automatically.
+
+---
+
+#### Dynamic Models
+
+Providers whose model list changes at runtime — local servers, gateways, or mesh-style routers — can advertise their models from an OpenAI-compatible `/models` endpoint instead of listing every id in `opencode.json`:
+
+```json title="opencode.json" "dynamicModels" {9}
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "myprovider": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "My Local Server",
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1",
+        "dynamicModels": true
+      }
+    }
+  }
+}
+```
+
+OpenCode requests `<baseURL>/models` and merges every `data[].id` it returns with the models you configured under `models`. Your own entries are never overwritten, so you can add names or `limit` values for the ids that matter:
+
+```json title="opencode.json" {8-12}
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "myprovider": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1",
+        "dynamicModels": true
+      },
+      "models": {
+        "my-model-name": {
+          "name": "My Model Display Name",
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Use `options.modelsURL` when the catalog lives at another path:
+
+```json
+"options": {
+  "baseURL": "http://127.0.0.1:8080/v1",
+  "dynamicModels": true,
+  "modelsURL": "http://127.0.0.1:8080/catalog"
+}
+```
+
+Discovery is best-effort. If the endpoint is unreachable or returns an unexpected payload, the provider keeps the models you configured and startup continues.
 
 ---
 

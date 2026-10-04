@@ -15,6 +15,8 @@ import { Config } from "@/config/config"
 import { Env } from "../../src/env"
 import { Plugin } from "../../src/plugin/index"
 import { Provider } from "@/provider/provider"
+import { MeshProvider } from "@/provider/mesh"
+import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Filesystem } from "@/util/filesystem"
@@ -2114,5 +2116,156 @@ it.effect("opencode loader keeps paid models when auth exists", () =>
 
     expect(none).toBe(0)
     expect(keyedCount).toBeGreaterThan(0)
+  }).pipe(provideMultiInstance),
+)
+
+// Mesh-LLM fork: dynamic model discovery and the seeded Mesh provider.
+
+const withModelsServer = (routes: Record<string, unknown>) =>
+  Effect.acquireRelease(
+    Effect.sync(() => {
+      const calls: string[] = []
+      const server = Bun.serve({
+        port: 0,
+        fetch(req) {
+          const pathname = new URL(req.url).pathname
+          calls.push(pathname)
+          if (!(pathname in routes)) return new Response("Not Found", { status: 404 })
+          return Response.json(routes[pathname])
+        },
+      })
+      return { server, calls }
+    }),
+    (value) => Effect.promise(() => value.server.stop(true)),
+  )
+
+const meshConfig = (
+  baseURL: string,
+  options: Record<string, unknown> = {},
+  models?: Record<string, { name?: string }>,
+): Partial<ConfigV1.Info> => ({
+  provider: {
+    "mesh-llm": {
+      name: "Mesh LLM",
+      npm: "@ai-sdk/openai-compatible",
+      options: { baseURL, apiKey: "dummy", dynamicModels: true, ...options },
+      ...(models ? { models } : {}),
+    },
+  },
+})
+
+it.effect("custom provider can discover models dynamically", () =>
+  Effect.gen(function* () {
+    const { server, calls } = yield* withModelsServer({
+      "/v1/models": { data: [{ id: "mesh-chat" }, { id: "mesh-reasoner" }] },
+    })
+    const dir = yield* tmpdirScoped({ config: meshConfig(`http://127.0.0.1:${server.port}/v1`) })
+
+    const providers = yield* Provider.use.list().pipe(provideInstanceEffect(dir))
+    const mesh = providers[ProviderV2.ID.make("mesh-llm")]
+    expect(mesh).toBeDefined()
+    expect(Object.keys(mesh.models)).toContain("mesh-chat")
+    expect(Object.keys(mesh.models)).toContain("mesh-reasoner")
+    expect(calls).toContain("/v1/models")
+  }).pipe(provideMultiInstance),
+)
+
+it.effect("custom provider dynamic discovery uses modelsURL override", () =>
+  Effect.gen(function* () {
+    const { server, calls } = yield* withModelsServer({
+      "/mesh/catalog": { data: [{ id: "mesh-custom" }] },
+    })
+    const dir = yield* tmpdirScoped({
+      config: meshConfig(`http://127.0.0.1:${server.port}/v1`, {
+        modelsURL: `http://127.0.0.1:${server.port}/mesh/catalog`,
+      }),
+    })
+
+    const providers = yield* Provider.use.list().pipe(provideInstanceEffect(dir))
+    expect(Object.keys(providers[ProviderV2.ID.make("mesh-llm")].models)).toContain("mesh-custom")
+    expect(calls).toContain("/mesh/catalog")
+    expect(calls).not.toContain("/v1/models")
+  }).pipe(provideMultiInstance),
+)
+
+it.effect("custom provider merges dynamic models with configured models", () =>
+  Effect.gen(function* () {
+    const { server } = yield* withModelsServer({ "/v1/models": { data: [{ id: "mesh-live" }] } })
+    const dir = yield* tmpdirScoped({
+      config: meshConfig(`http://127.0.0.1:${server.port}/v1`, {}, { "mesh-static": { name: "Static" } }),
+    })
+
+    const providers = yield* Provider.use.list().pipe(provideInstanceEffect(dir))
+    const models = Object.keys(providers[ProviderV2.ID.make("mesh-llm")].models)
+    expect(models).toContain("mesh-static")
+    expect(models).toContain("mesh-live")
+  }).pipe(provideMultiInstance),
+)
+
+it.effect("custom provider skips dynamic discovery when the endpoint fails", () =>
+  Effect.gen(function* () {
+    const { server } = yield* withModelsServer({})
+    const dir = yield* tmpdirScoped({
+      config: meshConfig(`http://127.0.0.1:${server.port}/v1`, {}, { "mesh-static": { name: "Static" } }),
+    })
+
+    const providers = yield* Provider.use.list().pipe(provideInstanceEffect(dir))
+    expect(Object.keys(providers[ProviderV2.ID.make("mesh-llm")].models)).toEqual(["mesh-static"])
+  }).pipe(provideMultiInstance),
+)
+
+it.effect("seeded mesh provider appears when a mesh answers", () =>
+  Effect.gen(function* () {
+    const { server } = yield* withModelsServer({ "/v1/models": { data: [{ id: "mesh" }, { id: "org/repo:Q4_K_M" }] } })
+    yield* setProcessEnv(MeshProvider.BASE_URL_ENV, `http://127.0.0.1:${server.port}/v1`)
+    const dir = yield* tmpdirScoped()
+
+    const providers = yield* Provider.use.list().pipe(provideInstanceEffect(dir))
+    const mesh = providers[ProviderV2.ID.make(MeshProvider.ID)]
+    expect(mesh).toBeDefined()
+    expect(mesh.name).toBe(MeshProvider.NAME)
+    expect(Object.keys(mesh.models)).toContain("mesh")
+    expect(Object.keys(mesh.models)).toContain("org/repo:Q4_K_M")
+    expect(mesh.models[ModelV2.ID.make("mesh")].limit.context).toBe(MeshProvider.CONTEXT_LIMIT_DEFAULT)
+    expect(mesh.models[ModelV2.ID.make("mesh")].limit.output).toBe(MeshProvider.OUTPUT_LIMIT_DEFAULT)
+  }).pipe(provideMultiInstance),
+)
+
+it.effect("seeded mesh provider stays hidden when no mesh answers", () =>
+  Effect.gen(function* () {
+    const port = yield* Effect.promise(async () => {
+      const server = Bun.serve({ port: 0, fetch: () => new Response("unreachable", { status: 404 }) })
+      const port = server.port
+      await server.stop(true)
+      return port
+    })
+    yield* setProcessEnv(MeshProvider.BASE_URL_ENV, `http://127.0.0.1:${port}/v1`)
+    const dir = yield* tmpdirScoped()
+
+    const providers = yield* Provider.use.list().pipe(provideInstanceEffect(dir))
+    expect(providers[ProviderV2.ID.make(MeshProvider.ID)]).toBeUndefined()
+  }).pipe(provideMultiInstance),
+)
+
+it.effect("seeded mesh provider leaves an explicit user config alone", () =>
+  Effect.gen(function* () {
+    yield* setProcessEnv(MeshProvider.BASE_URL_ENV, "http://127.0.0.1:1/v1")
+    const dir = yield* tmpdirScoped({
+      config: { provider: { "mesh-llm": { name: "Mine", models: { "static-model": { name: "Static" } } } } },
+    })
+
+    const providers = yield* Provider.use.list().pipe(provideInstanceEffect(dir))
+    expect(providers[ProviderV2.ID.make(MeshProvider.ID)].name).toBe("Mine")
+    expect(Object.keys(providers[ProviderV2.ID.make(MeshProvider.ID)].models)).toEqual(["static-model"])
+  }).pipe(provideMultiInstance),
+)
+
+it.effect("seeded mesh provider is disabled by an empty MESH_LLM_BASE_URL", () =>
+  Effect.gen(function* () {
+    yield* setProcessEnv(MeshProvider.BASE_URL_ENV, "")
+    const dir = yield* tmpdirScoped()
+
+    const providers = yield* Provider.use.list().pipe(provideInstanceEffect(dir))
+    expect(providers[ProviderV2.ID.make(MeshProvider.ID)]).toBeUndefined()
   }).pipe(provideMultiInstance),
 )
