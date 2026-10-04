@@ -283,7 +283,7 @@ const lowerToolConfig = (toolChoice: NonNullable<LLMRequest["toolChoice"]>) =>
     tool: (name) => ({ functionCallingConfig: { mode: "ANY" as const, allowedFunctionNames: [name] } }),
   })
 
-const lowerContentPart = Effect.fn("Gemini.lowerContentPart")(function* (part: TextPart | MediaPart) {
+const lowerContentPart = Effect.fnUntraced(function* (part: TextPart | MediaPart) {
   if (part.type === "text") return { text: part.text }
   return yield* GeminiGenerateContent.mediaPart("Gemini", part.media)
 })
@@ -302,7 +302,7 @@ const lowerToolCall = (part: ToolCallPart, omitIds: boolean, metadataKey: string
   thoughtSignature: thoughtSignature(part.providerMetadata, metadataKey),
 })
 
-const lowerMessages = Effect.fn("Gemini.lowerMessages")(function* (request: LLMRequest) {
+const lowerMessages = Effect.fnUntraced(function* (request: LLMRequest) {
   const contents: GeminiContent[] = []
   const metadataKey = request.model.route.providerMetadataKey ?? String(request.model.provider)
   const omitCallIds = omitsFunctionCallIds(request.model.id)
@@ -585,24 +585,24 @@ const finish = (state: ParserState): ReadonlyArray<LLMEvent> => {
 const step = (state: ParserState, event: GeminiEvent) => {
   if (ProviderShared.isRecord(event.error)) {
     const body = ProviderShared.encodeJson(event)
-    return Effect.fail(
-      new AIError({
-        reason: classifyProviderFailure({
-          message:
-            typeof event.error.message === "string" && event.error.message.length > 0
-              ? event.error.message
-              : typeof event.error.status === "string" && event.error.status.length > 0
-                ? event.error.status
-                : "Gemini provider error",
-          status: typeof event.error.code === "number" ? event.error.code : undefined,
-          rawBody: body,
-        }),
+    return new AIError({
+      reason: classifyProviderFailure({
+        message:
+          typeof event.error.message === "string" && event.error.message.length > 0
+            ? event.error.message
+            : typeof event.error.status === "string" && event.error.status.length > 0
+              ? event.error.status
+              : "Gemini provider error",
+        status: typeof event.error.code === "number" ? event.error.code : undefined,
+        rawBody: body,
       }),
-    )
+    })
   }
   if ("error" in event)
-    return Effect.fail(
-      ProviderShared.eventError(state.route, `Invalid ${state.route} stream event`, ProviderShared.encodeJson(event)),
+    return ProviderShared.eventError(
+      state.route,
+      `Invalid ${state.route} stream event`,
+      ProviderShared.encodeJson(event),
     )
   const nextState = {
     ...state,
@@ -613,18 +613,13 @@ const step = (state: ParserState, event: GeminiEvent) => {
   }
   const candidate = event.candidates?.[0]
   if (candidate?.finishReason && mapFinishReason(candidate.finishReason, state.hasToolCalls) === "error")
-    return Effect.fail(
-      ProviderShared.eventError(
-        state.route,
-        `Gemini stopped with ${candidate.finishReason}`,
-        ProviderShared.encodeJson(event),
-      ),
+    return ProviderShared.eventError(
+      state.route,
+      `Gemini stopped with ${candidate.finishReason}`,
+      ProviderShared.encodeJson(event),
     )
   if (!candidate?.content)
-    return Effect.succeed([
-      { ...nextState, finishReason: candidate?.finishReason ?? nextState.finishReason },
-      [],
-    ] as const)
+    return [{ ...nextState, finishReason: candidate?.finishReason ?? nextState.finishReason }, []] as const
 
   const events: LLMEvent[] = []
   let hasToolCalls = nextState.hasToolCalls
@@ -649,9 +644,7 @@ const step = (state: ParserState, event: GeminiEvent) => {
       continue
     const decoded = decodeGeminiContentPart(input)
     if (Option.isNone(decoded))
-      return Effect.fail(
-        ProviderShared.eventError(ADAPTER, `Invalid ${state.route} stream event`, ProviderShared.encodeJson(event)),
-      )
+      return ProviderShared.eventError(ADAPTER, `Invalid ${state.route} stream event`, ProviderShared.encodeJson(event))
     const part = decoded.value
     const signature = "thoughtSignature" in part && part.thoughtSignature ? part.thoughtSignature : undefined
     // Gemini attaches replay signatures to thought parts, visible text, or function calls;
@@ -772,7 +765,7 @@ const step = (state: ParserState, event: GeminiEvent) => {
     }
   }
 
-  return Effect.succeed([
+  return [
     {
       ...nextState,
       hasToolCalls,
@@ -787,7 +780,7 @@ const step = (state: ParserState, event: GeminiEvent) => {
       finishReason: candidate.finishReason ?? nextState.finishReason,
     },
     events,
-  ] as const)
+  ] as const
 }
 
 // =============================================================================
@@ -816,7 +809,7 @@ export const protocol = Protocol.make({
       nextTextId: 0,
     }),
     step,
-    onHalt: (state) => Effect.succeed(finish(state)),
+    onHalt: finish,
   },
 })
 

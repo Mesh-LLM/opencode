@@ -364,11 +364,7 @@ const mapUsage = (usage: RawUsage | undefined, key: string) => {
   })
 }
 
-const onStart = Effect.fn("GoogleInteractions.onStart")(function* (
-  state: ParserState,
-  index: number,
-  step: OutputStep,
-) {
+const onStart = (state: ParserState, index: number, step: OutputStep): StepResult | AIError => {
   const events: LLMEvent[] = []
   let lifecycle = Lifecycle.stepStart(state.lifecycle, events)
   let tools = state.tools
@@ -380,16 +376,12 @@ const onStart = Effect.fn("GoogleInteractions.onStart")(function* (
     lifecycle = Lifecycle.textStart(lifecycle, events, id)
     for (const part of step.content ?? []) {
       if (part.type !== "text")
-        return yield* ProviderShared.eventError(
-          ADAPTER,
-          `Unsupported Interactions output: ${part.type}`,
-          encodeJson(step),
-        )
+        return ProviderShared.eventError(ADAPTER, `Unsupported Interactions output: ${part.type}`, encodeJson(step))
       if (part.text) lifecycle = Lifecycle.textDelta(lifecycle, events, id, part.text)
     }
   } else if (step.type === "function_call") {
     if (!step.id || !step.name)
-      return yield* ProviderShared.eventError(ADAPTER, "Interactions function call lacks id or name", encodeJson(step))
+      return ProviderShared.eventError(ADAPTER, "Interactions function call lacks id or name", encodeJson(step))
     tools = ToolStream.start(tools, index, {
       id: step.id,
       name: step.name,
@@ -397,30 +389,21 @@ const onStart = Effect.fn("GoogleInteractions.onStart")(function* (
       input: step.arguments && Object.keys(step.arguments).length ? encodeJson(step.arguments) : "",
     })
     events.push(LLMEvent.toolInputStart({ id: step.id, name: step.name, providerMetadata: metadata(state, step) }))
-  } else
-    return yield* ProviderShared.eventError(ADAPTER, `Unsupported Interactions step: ${step.type}`, encodeJson(step))
-  return [{ ...state, lifecycle, tools, steps: { ...state.steps, [index]: step } }, events] satisfies StepResult
-})
+  } else return ProviderShared.eventError(ADAPTER, `Unsupported Interactions step: ${step.type}`, encodeJson(step))
+  return [{ ...state, lifecycle, tools, steps: { ...state.steps, [index]: step } }, events]
+}
 
-const onDelta = Effect.fn("GoogleInteractions.onDelta")(function* (
-  state: ParserState,
-  index: number,
-  delta: typeof Delta.Type,
-) {
+const onDelta = (state: ParserState, index: number, delta: typeof Delta.Type): StepResult | AIError => {
   const step = state.steps[index]
-  if (!step)
-    return yield* ProviderShared.eventError(ADAPTER, "Interactions delta without step.start", encodeJson(delta))
+  if (!step) return ProviderShared.eventError(ADAPTER, "Interactions delta without step.start", encodeJson(delta))
   const events: LLMEvent[] = []
   if (delta.type === "text" && "text" in delta && step.type === "model_output")
-    return [
-      { ...state, lifecycle: Lifecycle.textDelta(state.lifecycle, events, String(index), delta.text) },
-      events,
-    ] satisfies StepResult
+    return [{ ...state, lifecycle: Lifecycle.textDelta(state.lifecycle, events, String(index), delta.text) }, events]
   if (delta.type === "thought_summary" && "content" in delta && step.type === "thought")
     return [
       { ...state, lifecycle: Lifecycle.reasoningDelta(state.lifecycle, events, String(index), delta.content.text) },
       events,
-    ] satisfies StepResult
+    ]
   if (delta.type === "thought_signature" && "signature" in delta) {
     const next = { ...step, signature: delta.signature }
     const tool = state.tools[index]
@@ -431,7 +414,7 @@ const onDelta = Effect.fn("GoogleInteractions.onDelta")(function* (
         tools: tool ? { ...state.tools, [index]: { ...tool, providerMetadata: metadata(state, next) } } : state.tools,
       },
       events,
-    ] satisfies StepResult
+    ]
   }
   if (delta.type === "arguments_delta" && "arguments" in delta && step.type === "function_call") {
     const result = ToolStream.appendExisting(
@@ -441,43 +424,41 @@ const onDelta = Effect.fn("GoogleInteractions.onDelta")(function* (
       delta.arguments,
       "Interactions arguments without function call",
     )
-    if (ToolStream.isError(result)) return yield* result
-    return [{ ...state, tools: result.tools }, result.events] satisfies StepResult
+    if (ToolStream.isError(result)) return result
+    return [{ ...state, tools: result.tools }, result.events]
   }
-  return yield* ProviderShared.eventError(ADAPTER, `Unsupported Interactions delta: ${delta.type}`, encodeJson(delta))
-})
+  return ProviderShared.eventError(ADAPTER, `Unsupported Interactions delta: ${delta.type}`, encodeJson(delta))
+}
 
-const onStop = Effect.fn("GoogleInteractions.onStop")(function* (state: ParserState, index: number) {
+const onStop = (state: ParserState, index: number): StepResult | AIError => {
   const step = state.steps[index]
-  if (!step) return yield* ProviderShared.eventError(ADAPTER, "Interactions step.stop without step.start")
+  if (!step) return ProviderShared.eventError(ADAPTER, "Interactions step.stop without step.start")
   const events: LLMEvent[] = []
   if (step.type === "thought")
     return [
       { ...state, lifecycle: Lifecycle.reasoningEnd(state.lifecycle, events, String(index), metadata(state, step)) },
       events,
-    ] satisfies StepResult
+    ]
   if (step.type === "model_output")
-    return [
-      { ...state, lifecycle: Lifecycle.textEnd(state.lifecycle, events, String(index)) },
-      events,
-    ] satisfies StepResult
-  const result = yield* ToolStream.finish(ADAPTER, state.tools, index)
-  return [{ ...state, tools: result.tools }, result.events ?? []] satisfies StepResult
-})
+    return [{ ...state, lifecycle: Lifecycle.textEnd(state.lifecycle, events, String(index)) }, events]
+  const result = ToolStream.finish(ADAPTER, state.tools, index)
+  if (ToolStream.isError(result)) return result
+  return [{ ...state, tools: result.tools }, result.events ?? []]
+}
 
-const step = Effect.fn("GoogleInteractions.step")(function* (state: ParserState, event: Event) {
+const step = (state: ParserState, event: Event): StepResult | AIError => {
   switch (event.event_type) {
     case "step.start":
-      return yield* onStart(state, event.index, event.step)
+      return onStart(state, event.index, event.step)
     case "step.delta":
-      return yield* onDelta(state, event.index, event.delta)
+      return onDelta(state, event.index, event.delta)
     case "step.stop":
-      return yield* onStop(state, event.index)
+      return onStop(state, event.index)
     case "interaction.created":
     case "interaction.status_update":
-      return [state, []] satisfies StepResult
+      return [state, []]
     case "error":
-      return yield* new AIError({
+      return new AIError({
         reason: classifyProviderFailure({
           message: providerErrorMessage(encodeJson(event)) ?? "Google Interactions stream error",
           data: event.error,
@@ -487,7 +468,7 @@ const step = Effect.fn("GoogleInteractions.step")(function* (state: ParserState,
     case "interaction.completed": {
       const interaction = event.interaction
       if (interaction.status === "failed" || interaction.status === "cancelled")
-        return yield* new AIError({
+        return new AIError({
           reason: classifyProviderFailure({
             message: `Google Interactions ${interaction.status}`,
             data: interaction,
@@ -495,12 +476,13 @@ const step = Effect.fn("GoogleInteractions.step")(function* (state: ParserState,
           }),
         })
       if (!["completed", "requires_action", "incomplete"].includes(interaction.status))
-        return yield* ProviderShared.eventError(
+        return ProviderShared.eventError(
           ADAPTER,
           `Unexpected terminal Interactions status: ${interaction.status}`,
           encodeJson(event),
         )
-      const pending = yield* ToolStream.finishAll(ADAPTER, state.tools)
+      const pending = ToolStream.finishAll(ADAPTER, state.tools)
+      if (ToolStream.isError(pending)) return pending
       const events = [...pending.events]
       const lifecycle = Lifecycle.finish(state.lifecycle, events, {
         reason: {
@@ -515,10 +497,10 @@ const step = Effect.fn("GoogleInteractions.step")(function* (state: ParserState,
         usage: mapUsage(interaction.usage, state.metadataKey),
         providerMetadata: { [state.metadataKey]: { interactionId: interaction.id } },
       })
-      return [{ ...state, lifecycle, tools: pending.tools, completed: true }, events] satisfies StepResult
+      return [{ ...state, lifecycle, tools: pending.tools, completed: true }, events]
     }
   }
-})
+}
 
 // =============================================================================
 // Protocol And Route
@@ -540,11 +522,7 @@ export const protocol = Protocol.make({
     step,
     terminal: (event) => event.event_type === "interaction.completed",
     onHalt: (state) =>
-      state.completed
-        ? Effect.succeed([])
-        : Effect.fail(
-            ProviderShared.eventError(ADAPTER, "Google Interactions stream ended before interaction.completed"),
-          ),
+      state.completed ? [] : ProviderShared.eventError(ADAPTER, "Google Interactions stream ended before interaction.completed"),
   },
 })
 

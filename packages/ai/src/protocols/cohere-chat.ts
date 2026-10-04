@@ -252,7 +252,7 @@ const mapUsage = (usage: typeof NativeUsage.Type) =>
   })
 
 // Lifecycle deltas open blocks on demand and ends are no-ops for closed blocks, so content-start needs no handling.
-const step = Effect.fn("CohereChat.step")(function* (state: State, event: Event) {
+const step = (state: State, event: Event) => {
   const events: LLMEvent[] = []
   switch (event.type) {
     case "message-start":
@@ -288,15 +288,17 @@ const step = Effect.fn("CohereChat.step")(function* (state: State, event: Event)
         { id: call.id, name: call.function.name, text: call.function.arguments ?? "" },
         "Cohere tool call is missing id or name",
       )
-      if (ToolStream.isError(result)) return yield* result
+      if (ToolStream.isError(result)) return result
       return [{ ...state, tools: result.tools }, result.events] as const
     }
     case "tool-call-end": {
-      const result = yield* ToolStream.finish(ADAPTER, state.tools, event.index)
+      const result = ToolStream.finish(ADAPTER, state.tools, event.index)
+      if (ToolStream.isError(result)) return result
       return [{ ...state, tools: result.tools }, result.events ?? []] as const
     }
     case "message-end": {
-      const pending = yield* ToolStream.finishAll(ADAPTER, state.tools)
+      const pending = ToolStream.finishAll(ADAPTER, state.tools)
+      if (ToolStream.isError(pending)) return pending
       events.push(...pending.events)
       const lifecycle = Lifecycle.finish(state.lifecycle, events, {
         reason: finishReason(event.delta.finish_reason),
@@ -307,7 +309,7 @@ const step = Effect.fn("CohereChat.step")(function* (state: State, event: Event)
     default:
       return [state, events] as const
   }
-})
+}
 
 export const protocol = Protocol.make({
   id: ADAPTER,
@@ -317,10 +319,7 @@ export const protocol = Protocol.make({
     initial: (): State => ({ lifecycle: Lifecycle.initial(), tools: ToolStream.empty(), finished: false }),
     step,
     terminal: (event) => event.type === "message-end",
-    onHalt: (state) =>
-      state.finished
-        ? Effect.succeed([])
-        : Effect.fail(ProviderShared.eventError(ADAPTER, "Cohere stream ended without message-end")),
+    onHalt: (state) => (state.finished ? [] : ProviderShared.eventError(ADAPTER, "Cohere stream ended without message-end")),
   },
 })
 export const route = Route.make({

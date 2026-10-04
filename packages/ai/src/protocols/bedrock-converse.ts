@@ -1,4 +1,4 @@
-import { Effect, Encoding, Schema } from "effect"
+import { Effect, Encoding, Result, Schema } from "effect"
 import { Route } from "../route/client.js"
 import { Endpoint } from "../route/endpoint.js"
 import { Protocol } from "../route/protocol.js"
@@ -285,7 +285,7 @@ const lowerToolCall = (part: ToolCallPart, normalizeID: (id: string) => string):
   },
 })
 
-const lowerToolResultContent = Effect.fn("BedrockConverse.lowerToolResultContent")(function* (
+const lowerToolResultContent = Effect.fnUntraced(function* (
   part: ToolResultPart,
   documentNames: Set<string>,
 ) {
@@ -305,7 +305,7 @@ const lowerToolResultContent = Effect.fn("BedrockConverse.lowerToolResultContent
   return content
 })
 
-const lowerToolResult = Effect.fn("BedrockConverse.lowerToolResult")(function* (
+const lowerToolResult = Effect.fnUntraced(function* (
   part: ToolResultPart,
   documentNames: Set<string>,
   normalizeID: (id: string) => string,
@@ -322,7 +322,7 @@ const lowerToolResult = Effect.fn("BedrockConverse.lowerToolResult")(function* (
 // Keep Claude and Nova tool-result images inline; put other models' images beside the result.
 const keepToolImagesInline = (id: string) => id.includes("anthropic.claude-") || id.includes("amazon.nova-")
 
-const lowerMessages = Effect.fn("BedrockConverse.lowerMessages")(function* (
+const lowerMessages = Effect.fnUntraced(function* (
   request: LLMRequest,
   breakpoints: BedrockCache.Breakpoints,
 ) {
@@ -612,204 +612,203 @@ interface ParserState {
 
 const encodeRedactedContent = (chunks: ReadonlyArray<Uint8Array>) => Encoding.encodeBase64(concatBytes(chunks))
 
-const step = (state: ParserState, event: BedrockEvent) =>
-  Effect.gen(function* () {
-    if (event.contentBlockStart?.start?.toolUse) {
-      const index = event.contentBlockStart.contentBlockIndex
-      const events: LLMEvent[] = []
-      const lifecycle = Lifecycle.stepStart(state.lifecycle, events)
-      return [
-        {
-          ...state,
-          lifecycle,
-          tools: ToolStream.start(state.tools, index, {
-            id: event.contentBlockStart.start.toolUse.toolUseId,
-            name: event.contentBlockStart.start.toolUse.name,
-          }),
-        },
-        [
-          ...events,
-          LLMEvent.toolInputStart({
-            id: event.contentBlockStart.start.toolUse.toolUseId,
-            name: event.contentBlockStart.start.toolUse.name,
-          }),
-        ],
-      ] as const
-    }
-
-    if (event.contentBlockDelta?.delta?.text) {
-      const events: LLMEvent[] = []
-      return [
-        {
-          ...state,
-          lifecycle: Lifecycle.textDelta(
-            state.lifecycle,
-            events,
-            `text-${event.contentBlockDelta.contentBlockIndex}`,
-            event.contentBlockDelta.delta.text,
-          ),
-        },
-        events,
-      ] as const
-    }
-
-    if (event.contentBlockDelta?.delta?.reasoningContent) {
-      const index = event.contentBlockDelta.contentBlockIndex
-      const reasoning = event.contentBlockDelta.delta.reasoningContent
-      const events: LLMEvent[] = []
-      const redactedChunk = yield* (() => {
-        if (reasoning.redactedContent === undefined) return Effect.succeed(undefined)
-        return Effect.fromResult(Encoding.decodeBase64(reasoning.redactedContent)).pipe(
-          Effect.mapError((cause) =>
-            ProviderShared.eventError(
-              ADAPTER,
-              "Bedrock Converse reasoningContent.redactedContent contains invalid base64 data",
-              undefined,
-              cause,
-            ),
-          ),
-        )
-      })()
-      const redactedChunks = state.reasoningRedactedContent[index] ?? []
-      if (redactedChunk !== undefined) redactedChunks.push(redactedChunk)
-      const metadata = (() => {
-        if (reasoning.signature) return providerMetadata(state.providerMetadataKey, { signature: reasoning.signature })
-        if (redactedChunk === undefined && reasoning.data !== undefined)
-          return providerMetadata(state.providerMetadataKey, { redactedData: reasoning.data })
-      })()
-      const lifecycle = (() => {
-        if (reasoning.text !== undefined || metadata !== undefined)
-          return Lifecycle.reasoningDelta(state.lifecycle, events, `reasoning-${index}`, reasoning.text ?? "", metadata)
-        if (redactedChunk !== undefined) return Lifecycle.reasoningStart(state.lifecycle, events, `reasoning-${index}`)
-        return state.lifecycle
-      })()
-      const reasoningRedactedContent = (() => {
-        if (redactedChunk !== undefined) return { ...state.reasoningRedactedContent, [index]: redactedChunks }
-        if (reasoning.data === undefined) return state.reasoningRedactedContent
-        return Object.fromEntries(
-          Object.entries(state.reasoningRedactedContent).filter(([key]) => key !== String(index)),
-        )
-      })()
-      const reasoningSignatures = (() => {
-        if (!reasoning.signature) return state.reasoningSignatures
-        return { ...state.reasoningSignatures, [index]: reasoning.signature }
-      })()
-      return [
-        {
-          ...state,
-          lifecycle,
-          reasoningSignatures,
-          reasoningRedactedContent,
-        },
-        events,
-      ] as const
-    }
-
-    if (event.contentBlockDelta?.delta?.toolUse) {
-      // A delta for a block that is not open, whether it already stopped or never
-      // started, has nothing to attach to and is dropped.
-      const result = ToolStream.append(
-        state.tools,
-        event.contentBlockDelta.contentBlockIndex,
-        event.contentBlockDelta.delta.toolUse.input,
-      )
-      if (!result) return [state, []] as const
-      const events: LLMEvent[] = []
-      const lifecycle = result.events.length ? Lifecycle.stepStart(state.lifecycle, events) : state.lifecycle
-      events.push(...result.events)
-      return [{ ...state, lifecycle, tools: result.tools }, events] as const
-    }
-
-    if (event.contentBlockStop) {
-      const index = event.contentBlockStop.contentBlockIndex
-      const result = yield* ToolStream.finish(ADAPTER, state.tools, index)
-      const events: LLMEvent[] = []
-      const resultEvents = result.events ?? []
-      const lifecycle = (() => {
-        if (resultEvents.length) return Lifecycle.stepStart(state.lifecycle, events)
-        const metadata = (() => {
-          const signature = state.reasoningSignatures[index]
-          if (signature) return providerMetadata(state.providerMetadataKey, { signature })
-          const redactedContent = state.reasoningRedactedContent[index]
-          if (redactedContent)
-            return providerMetadata(state.providerMetadataKey, {
-              redactedData: encodeRedactedContent(redactedContent),
-            })
-        })()
-        return Lifecycle.reasoningEnd(
-          Lifecycle.textEnd(state.lifecycle, events, `text-${index}`),
-          events,
-          `reasoning-${index}`,
-          metadata,
-        )
-      })()
-      events.push(...resultEvents)
-      return [
-        {
-          ...state,
-          hasToolCalls:
-            resultEvents.some((event) => LLMEvent.is.toolCall(event) || LLMEvent.is.toolInputError(event)) ||
-            state.hasToolCalls,
-          lifecycle,
-          tools: result.tools,
-          reasoningSignatures: Object.fromEntries(
-            Object.entries(state.reasoningSignatures).filter(([key]) => key !== String(index)),
-          ),
-          reasoningRedactedContent: Object.fromEntries(
-            Object.entries(state.reasoningRedactedContent).filter(([key]) => key !== String(index)),
-          ),
-        },
-        events,
-      ] as const
-    }
-
-    if (event.messageStop) {
-      if (
-        event.messageStop.stopReason === "malformed_model_output" ||
-        event.messageStop.stopReason === "malformed_tool_use"
-      )
-        return yield* ProviderShared.eventError(
-          ADAPTER,
-          `Bedrock Converse stopped with ${event.messageStop.stopReason}`,
-          ProviderShared.encodeJson(event),
-        )
-      return [
-        {
-          ...state,
-          finishReason: {
-            normalized: mapFinishReason(event.messageStop.stopReason),
-            raw: event.messageStop.stopReason,
-          },
-        },
-        [],
-      ] as const
-    }
-
-    if (event.metadata) {
-      const usage = mapUsage(event.metadata.usage, state.providerMetadataKey) ?? state.usage
-      return [
-        {
-          ...state,
-          usage,
-        },
-        [],
-      ] as const
-    }
-
-    if (event.exception) {
-      const message =
-        event.exception.details.message ?? event.exception.details.originalMessage ?? "Bedrock Converse stream error"
-      const body = ProviderShared.encodeJson(event)
-      return yield* new AIError({
-        reason: classifyProviderFailure({
-          message,
-          rawBody: body,
+const step = (state: ParserState, event: BedrockEvent) => {
+  if (event.contentBlockStart?.start?.toolUse) {
+    const index = event.contentBlockStart.contentBlockIndex
+    const events: LLMEvent[] = []
+    const lifecycle = Lifecycle.stepStart(state.lifecycle, events)
+    return [
+      {
+        ...state,
+        lifecycle,
+        tools: ToolStream.start(state.tools, index, {
+          id: event.contentBlockStart.start.toolUse.toolUseId,
+          name: event.contentBlockStart.start.toolUse.name,
         }),
-      })
-    }
+      },
+      [
+        ...events,
+        LLMEvent.toolInputStart({
+          id: event.contentBlockStart.start.toolUse.toolUseId,
+          name: event.contentBlockStart.start.toolUse.name,
+        }),
+      ],
+    ] as const
+  }
 
-    return [state, []] as const
-  })
+  if (event.contentBlockDelta?.delta?.text) {
+    const events: LLMEvent[] = []
+    return [
+      {
+        ...state,
+        lifecycle: Lifecycle.textDelta(
+          state.lifecycle,
+          events,
+          `text-${event.contentBlockDelta.contentBlockIndex}`,
+          event.contentBlockDelta.delta.text,
+        ),
+      },
+      events,
+    ] as const
+  }
+
+  if (event.contentBlockDelta?.delta?.reasoningContent) {
+    const index = event.contentBlockDelta.contentBlockIndex
+    const reasoning = event.contentBlockDelta.delta.reasoningContent
+    const events: LLMEvent[] = []
+    let redactedChunk: Uint8Array | undefined
+    if (reasoning.redactedContent !== undefined) {
+      const decoded = Encoding.decodeBase64(reasoning.redactedContent)
+      if (Result.isFailure(decoded))
+        return ProviderShared.eventError(
+          ADAPTER,
+          "Bedrock Converse reasoningContent.redactedContent contains invalid base64 data",
+          undefined,
+          decoded.failure,
+        )
+      redactedChunk = decoded.success
+    }
+    const redactedChunks = state.reasoningRedactedContent[index] ?? []
+    if (redactedChunk !== undefined) redactedChunks.push(redactedChunk)
+    const metadata = (() => {
+      if (reasoning.signature) return providerMetadata(state.providerMetadataKey, { signature: reasoning.signature })
+      if (redactedChunk === undefined && reasoning.data !== undefined)
+        return providerMetadata(state.providerMetadataKey, { redactedData: reasoning.data })
+    })()
+    const lifecycle = (() => {
+      if (reasoning.text !== undefined || metadata !== undefined)
+        return Lifecycle.reasoningDelta(state.lifecycle, events, `reasoning-${index}`, reasoning.text ?? "", metadata)
+      if (redactedChunk !== undefined) return Lifecycle.reasoningStart(state.lifecycle, events, `reasoning-${index}`)
+      return state.lifecycle
+    })()
+    const reasoningRedactedContent = (() => {
+      if (redactedChunk !== undefined) return { ...state.reasoningRedactedContent, [index]: redactedChunks }
+      if (reasoning.data === undefined) return state.reasoningRedactedContent
+      return Object.fromEntries(
+        Object.entries(state.reasoningRedactedContent).filter(([key]) => key !== String(index)),
+      )
+    })()
+    const reasoningSignatures = (() => {
+      if (!reasoning.signature) return state.reasoningSignatures
+      return { ...state.reasoningSignatures, [index]: reasoning.signature }
+    })()
+    return [
+      {
+        ...state,
+        lifecycle,
+        reasoningSignatures,
+        reasoningRedactedContent,
+      },
+      events,
+    ] as const
+  }
+
+  if (event.contentBlockDelta?.delta?.toolUse) {
+    // A delta for a block that is not open, whether it already stopped or never
+    // started, has nothing to attach to and is dropped.
+    const result = ToolStream.append(
+      state.tools,
+      event.contentBlockDelta.contentBlockIndex,
+      event.contentBlockDelta.delta.toolUse.input,
+    )
+    if (!result) return [state, []] as const
+    const events: LLMEvent[] = []
+    const lifecycle = result.events.length ? Lifecycle.stepStart(state.lifecycle, events) : state.lifecycle
+    events.push(...result.events)
+    return [{ ...state, lifecycle, tools: result.tools }, events] as const
+  }
+
+  if (event.contentBlockStop) {
+    const index = event.contentBlockStop.contentBlockIndex
+    const result = ToolStream.finish(ADAPTER, state.tools, index)
+    if (ToolStream.isError(result)) return result
+    const events: LLMEvent[] = []
+    const resultEvents = result.events ?? []
+    const lifecycle = (() => {
+      if (resultEvents.length) return Lifecycle.stepStart(state.lifecycle, events)
+      const metadata = (() => {
+        const signature = state.reasoningSignatures[index]
+        if (signature) return providerMetadata(state.providerMetadataKey, { signature })
+        const redactedContent = state.reasoningRedactedContent[index]
+        if (redactedContent)
+          return providerMetadata(state.providerMetadataKey, {
+            redactedData: encodeRedactedContent(redactedContent),
+          })
+      })()
+      return Lifecycle.reasoningEnd(
+        Lifecycle.textEnd(state.lifecycle, events, `text-${index}`),
+        events,
+        `reasoning-${index}`,
+        metadata,
+      )
+    })()
+    events.push(...resultEvents)
+    return [
+      {
+        ...state,
+        hasToolCalls:
+          resultEvents.some((event) => LLMEvent.is.toolCall(event) || LLMEvent.is.toolInputError(event)) ||
+          state.hasToolCalls,
+        lifecycle,
+        tools: result.tools,
+        reasoningSignatures: Object.fromEntries(
+          Object.entries(state.reasoningSignatures).filter(([key]) => key !== String(index)),
+        ),
+        reasoningRedactedContent: Object.fromEntries(
+          Object.entries(state.reasoningRedactedContent).filter(([key]) => key !== String(index)),
+        ),
+      },
+      events,
+    ] as const
+  }
+
+  if (event.messageStop) {
+    if (
+      event.messageStop.stopReason === "malformed_model_output" ||
+      event.messageStop.stopReason === "malformed_tool_use"
+    )
+      return ProviderShared.eventError(
+        ADAPTER,
+        `Bedrock Converse stopped with ${event.messageStop.stopReason}`,
+        ProviderShared.encodeJson(event),
+      )
+    return [
+      {
+        ...state,
+        finishReason: {
+          normalized: mapFinishReason(event.messageStop.stopReason),
+          raw: event.messageStop.stopReason,
+        },
+      },
+      [],
+    ] as const
+  }
+
+  if (event.metadata) {
+    const usage = mapUsage(event.metadata.usage, state.providerMetadataKey) ?? state.usage
+    return [
+      {
+        ...state,
+        usage,
+      },
+      [],
+    ] as const
+  }
+
+  if (event.exception) {
+    const message =
+      event.exception.details.message ?? event.exception.details.originalMessage ?? "Bedrock Converse stream error"
+    const body = ProviderShared.encodeJson(event)
+    return new AIError({
+      reason: classifyProviderFailure({
+        message,
+        rawBody: body,
+      }),
+    })
+  }
+
+  return [state, []] as const
+}
 
 const framing = BedrockEventStream.framing(ADAPTER)
 
@@ -868,7 +867,7 @@ export const protocol = Protocol.make({
       reasoningRedactedContent: {},
     }),
     step,
-    onHalt: (state) => Effect.succeed(onHalt(state)),
+    onHalt,
   },
 })
 

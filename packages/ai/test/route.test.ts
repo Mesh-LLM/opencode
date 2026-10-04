@@ -116,16 +116,14 @@ describe("Route diagnostics", () => {
               event: Schema.fromJsonString(Schema.Struct({ type: Schema.String })),
               initial: () => undefined,
               step: (_state, event) =>
-                Effect.fail(
-                  new AIError({
-                    reason: new InvalidProviderOutputError({
-                      message: "Parser failed",
-                      body: body ?? JSON.stringify(event),
-                      http,
-                      cause,
-                    }),
+                new AIError({
+                  reason: new InvalidProviderOutputError({
+                    message: "Parser failed",
+                    body: body ?? JSON.stringify(event),
+                    http,
+                    cause,
                   }),
-                ),
+                }),
             },
           },
         })

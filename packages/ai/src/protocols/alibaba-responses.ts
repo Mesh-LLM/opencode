@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
 import { Protocol } from "../route/protocol.js"
 import { OpenResponses } from "./open-responses.js"
 import { JsonObject, ProviderShared } from "./shared.js"
@@ -42,6 +42,8 @@ const tools = {
   code_interpreter_call: { name: "code_interpreter", input: (item) => ({ code: item.code }) },
 } satisfies ResponsesHostedTools.Definitions
 
+const decodeWebExtractorItem = Schema.decodeUnknownResult(WebExtractorItem)
+
 export const protocol = Protocol.make({
   id: adapter.id,
   body: {
@@ -66,29 +68,26 @@ export const protocol = Protocol.make({
   stream: {
     event: OpenResponses.protocol.stream.event,
     initial: (req) => OpenResponses.initial(req, adapter),
-    step: (state, input) =>
-      Effect.gen(function* () {
-        const event = OpenResponses.normalize(state, input)
-        if (event.type !== "response.output_item.done" || !event.item) return yield* OpenResponses.step(state, event)
-        if (event.item.type === "web_extractor_call") {
-          const item = yield* Schema.decodeUnknownEffect(WebExtractorItem)(event.item).pipe(
-            Effect.mapError((cause) =>
-              ProviderShared.eventError(
-                adapter.id,
-                "Alibaba returned an invalid web extraction item",
-                ProviderShared.encodeJson(event),
-                cause,
-              ),
-            ),
+    step: (state, input) => {
+      const event = OpenResponses.normalize(state, input)
+      if (event.type !== "response.output_item.done" || !event.item) return OpenResponses.step(state, event)
+      if (event.item.type === "web_extractor_call") {
+        const decoded = decodeWebExtractorItem(event.item)
+        if (Result.isFailure(decoded))
+          return ProviderShared.eventError(
+            adapter.id,
+            "Alibaba returned an invalid web extraction item",
+            ProviderShared.encodeJson(event),
+            decoded.failure,
           )
-          return yield* ResponsesHostedTools.onDone(state, item, {
-            web_extractor_call: { name: "web_extractor", input: () => ({ urls: item.urls, goal: item.goal }) },
-          })
-        }
-        if (ResponsesHostedTools.isItem(event.item, tools))
-          return yield* ResponsesHostedTools.onDone(state, event.item, tools)
-        return yield* OpenResponses.step(state, event)
-      }),
+        const item = decoded.success
+        return ResponsesHostedTools.onDone(state, item, {
+          web_extractor_call: { name: "web_extractor", input: () => ({ urls: item.urls, goal: item.goal }) },
+        })
+      }
+      if (ResponsesHostedTools.isItem(event.item, tools)) return ResponsesHostedTools.onDone(state, event.item, tools)
+      return OpenResponses.step(state, event)
+    },
     terminal: OpenResponses.terminal,
   },
 })

@@ -360,7 +360,7 @@ const lowerToolCall = (
   extra_content: decodeExtraContent(part.providerMetadata?.[options.providerMetadataKey]?.extraContent),
 })
 
-const lowerMedia = Effect.fn("OpenAIChat.lowerMedia")(function* (part: MediaPart) {
+const lowerMedia = Effect.fnUntraced(function* (part: MediaPart) {
   // Chat Completions accepts PDFs, and no other documents, as inline `file` parts; file URLs are not supported.
   if (part.media.mediaType.toLowerCase() === "application/pdf")
     return {
@@ -406,7 +406,7 @@ const lowerReasoningDetail = (detail: ReasoningDetail) => {
 
 const isKimiDetail = (detail: { readonly type: string }) => detail.type === "summary" || detail.type === "encrypted"
 
-const lowerUserMessage = Effect.fn("OpenAIChat.lowerUserMessage")(function* (
+const lowerUserMessage = Effect.fnUntraced(function* (
   message: OpenAIChatRequestMessage,
   options: LoweringOptions,
 ) {
@@ -430,7 +430,7 @@ const lowerUserMessage = Effect.fn("OpenAIChat.lowerUserMessage")(function* (
   return { role: "user" as const, content }
 })
 
-const lowerAssistantMessage = Effect.fn("OpenAIChat.lowerAssistantMessage")(function* (
+const lowerAssistantMessage = Effect.fnUntraced(function* (
   message: OpenAIChatRequestMessage,
   configuredField: string | undefined,
   requireReasoning: boolean,
@@ -495,7 +495,7 @@ const lowerAssistantMessage = Effect.fn("OpenAIChat.lowerAssistantMessage")(func
   return { ...result, [field]: reasoningText }
 })
 
-const lowerToolMessages = Effect.fn("OpenAIChat.lowerToolMessages")(function* (
+const lowerToolMessages = Effect.fnUntraced(function* (
   message: OpenAIChatRequestMessage,
   options: LoweringOptions,
 ) {
@@ -532,7 +532,7 @@ const toolMessage = (toolCallID: string, text: string, cacheControl: OpenAIChatC
   content: cacheControl === undefined ? text : [{ type: "text" as const, text, cache_control: cacheControl }],
 })
 
-const lowerMessage = Effect.fn("OpenAIChat.lowerMessage")(function* (
+const lowerMessage = Effect.fnUntraced(function* (
   message: OpenAIChatRequestMessage,
   reasoningField: string | undefined,
   requireReasoning: boolean,
@@ -544,7 +544,7 @@ const lowerMessage = Effect.fn("OpenAIChat.lowerMessage")(function* (
   return (yield* lowerToolMessages(message, options)).messages
 })
 
-const lowerMessages = Effect.fn("OpenAIChat.lowerMessages")(function* (request: LLMRequest, options: LoweringOptions) {
+const lowerMessages = Effect.fnUntraced(function* (request: LLMRequest, options: LoweringOptions) {
   const system: OpenAIChatMessage[] =
     request.system.length === 0
       ? []
@@ -855,17 +855,17 @@ export const fromRequest = Effect.fn("OpenAIChat.fromRequest")(function* (
 // Streaming parsers are small state machines: every event returns a new state
 // plus the common `LLMEvent`s produced by that event. Tool calls are accumulated
 // because OpenAI streams JSON arguments across multiple deltas.
-const mapFinishReason = Effect.fn("OpenAIChat.mapFinishReason")(function* (event: OpenAIChatEvent, reason: string) {
+const mapFinishReason = (event: OpenAIChatEvent, reason: string) => {
   switch (reason) {
     case "error":
-      return yield* new AIError({
+      return new AIError({
         reason: new UnknownProviderError({
           message: "Provider reported an error (finish_reason: error)",
           body: ProviderShared.encodeJson(event),
         }),
       })
     case "network_error":
-      return yield* new AIError({
+      return new AIError({
         reason: new ProviderInternalError({
           message: "Provider reported a network error (finish_reason: network_error)",
           body: ProviderShared.encodeJson(event),
@@ -882,14 +882,14 @@ const mapFinishReason = Effect.fn("OpenAIChat.mapFinishReason")(function* (event
     case "tool_calls":
       return "tool-calls" as const
     default:
-      return yield* new AIError({
+      return new AIError({
         reason: new UnknownProviderError({
           message: `Provider finish_reason: ${reason}`,
           body: ProviderShared.encodeJson(event),
         }),
       })
   }
-})
+}
 
 // OpenAI Chat reports `prompt_tokens` (inclusive total) with a
 // cached-read and cache-write subsets, and `completion_tokens` (inclusive
@@ -1036,187 +1036,190 @@ const reasoningMetadata = (
   },
 })
 
-const step = (state: ParserState, event: OpenAIChatEvent) =>
-  Effect.gen(function* () {
-    if (event.error) {
-      const body = ProviderShared.encodeJson(event)
-      return yield* new AIError({
-        reason: classifyProviderFailure({
-          message: event.error.message,
-          status: typeof event.error.code === "number" ? event.error.code : undefined,
-          rawBody: body,
-        }),
-      })
+const step = (state: ParserState, event: OpenAIChatEvent) => {
+  if (event.error) {
+    const body = ProviderShared.encodeJson(event)
+    return new AIError({
+      reason: classifyProviderFailure({
+        message: event.error.message,
+        status: typeof event.error.code === "number" ? event.error.code : undefined,
+        rawBody: body,
+      }),
+    })
+  }
+  const events: LLMEvent[] = []
+  const choice = event.choices?.[0]
+  // Moonshot (and a few other OpenAI-compatible providers) attach usage to
+  // `choice.usage` instead of the top-level `usage` field.
+  const choiceUsage = (choice as unknown as { usage?: OpenAIChatEvent["usage"] })?.usage
+  const usage =
+    mapUsage(event.usage, state.providerMetadataKey) ??
+    (choiceUsage ? mapUsage(choiceUsage, state.providerMetadataKey) : undefined) ??
+    state.usage
+  const rawFinishReason = choice?.finish_reason
+  let finishReason = state.finishReason
+  if (rawFinishReason) {
+    const normalized = mapFinishReason(event, rawFinishReason)
+    if (normalized instanceof AIError) return normalized
+    finishReason = {
+      normalized,
+      raw: choice?.native_finish_reason ?? rawFinishReason,
     }
-    const events: LLMEvent[] = []
-    const choice = event.choices?.[0]
-    // Moonshot (and a few other OpenAI-compatible providers) attach usage to
-    // `choice.usage` instead of the top-level `usage` field.
-    const choiceUsage = (choice as unknown as { usage?: OpenAIChatEvent["usage"] })?.usage
-    const usage =
-      mapUsage(event.usage, state.providerMetadataKey) ??
-      (choiceUsage ? mapUsage(choiceUsage, state.providerMetadataKey) : undefined) ??
-      state.usage
-    const rawFinishReason = choice?.finish_reason
-    const finishReason = rawFinishReason
-      ? {
-          normalized: yield* mapFinishReason(event, rawFinishReason),
-          raw: choice?.native_finish_reason ?? rawFinishReason,
-        }
-      : state.finishReason
-    const delta = choice?.delta
-    const toolDeltas = delta?.tool_calls ?? []
-    let tools = state.tools
-    let pendingTools = state.pendingTools
-    let latestToolIndex = state.latestToolIndex
-    let nextToolIndex = state.nextToolIndex
+  }
+  const delta = choice?.delta
+  const toolDeltas = delta?.tool_calls ?? []
+  let tools = state.tools
+  let pendingTools = state.pendingTools
+  let latestToolIndex = state.latestToolIndex
+  let nextToolIndex = state.nextToolIndex
 
-    let lifecycle = state.lifecycle
+  let lifecycle = state.lifecycle
 
-    const reasoning = reasoningDelta(delta, state.reasoningField)
-    const hasLateContent =
-      Boolean(delta?.content) ||
-      Boolean(delta?.refusal) ||
-      reasoning !== undefined ||
-      (Array.isArray(delta?.reasoning_details) && delta.reasoning_details.length > 0) ||
-      toolDeltas.some((tool) => Boolean(tool.id) || Boolean(tool.function?.name) || Boolean(tool.function?.arguments))
-    if (state.finishReason !== undefined) {
-      if (hasLateContent)
-        return yield* ProviderShared.eventError(
-          ADAPTER,
-          "OpenAI Chat received content after the finish reason",
-          ProviderShared.encodeJson(event),
-        )
-      return [{ ...state, usage }, events] as const
-    }
-
-    const reasoningField = state.reasoningField ?? reasoning?.field
-    const reasoningTextObserved = state.reasoningTextObserved || reasoning !== undefined
-    const detailDelta = Array.isArray(delta?.reasoning_details)
-      ? knownReasoningDetails(delta.reasoning_details)
-      : undefined
-    if (detailDelta !== undefined) appendReasoningDetails(state.reasoningDetails, detailDelta)
-    const reasoningDetailsObserved = state.reasoningDetailsObserved || detailDelta !== undefined
-    const deltaMetadata = reasoningMetadata(state.providerMetadataKey, reasoningField)
-    const text = detailDelta?.length
-      ? (detailText(detailDelta, reasoningTextObserved) ?? reasoning?.text)
-      : reasoning?.text
-    if (text !== undefined) lifecycle = Lifecycle.reasoningDelta(lifecycle, events, "reasoning-0", text, deltaMetadata)
-    else if (
-      reasoningDetailsObserved &&
-      !lifecycle.reasoning.has("reasoning-0") &&
-      (Boolean(delta?.content) || Boolean(delta?.refusal) || toolDeltas.length > 0)
-    )
-      lifecycle = Lifecycle.reasoningStart(lifecycle, events, "reasoning-0", deltaMetadata)
-    const reasoningEmitted = state.reasoningEmitted || lifecycle.reasoning.has("reasoning-0")
-
-    // Reasoning is one response-wide channel: it stays open alongside text and
-    // refusal output so late reasoning deltas and details join the same block,
-    // and `finishEvents` closes it once with the complete metadata.
-    if (delta?.content) lifecycle = Lifecycle.textDelta(lifecycle, events, "text-0", delta.content)
-
-    if (delta?.refusal) lifecycle = Lifecycle.textDelta(lifecycle, events, "text-0", delta.refusal)
-
-    // Compatible providers may omit indexes. Prefer durable identity, then use
-    // batch position for parallel deltas or the latest call for sparse chunks.
-    for (const [position, tool] of toolDeltas.entries()) {
-      const matched = toolIndexByID(tools, pendingTools, tool.id || undefined)
-      const fallback = toolDeltas.length > 1 ? position : (latestToolIndex ?? position)
-      const fallbackTool = tools[fallback] ?? pendingTools[fallback]
-      const index =
-        tool.index ?? matched ?? (tool.id && fallbackTool?.id && fallbackTool.id !== tool.id ? nextToolIndex : fallback)
-      const current = tools[index]
-      const pending = pendingTools[index]
-      const id = current?.id ?? pending?.id ?? (tool.id || undefined)
-      const name = current?.name ?? pending?.name ?? (tool.function?.name || undefined)
-      const text = `${pending?.input ?? ""}${tool.function?.arguments ?? ""}`
-      const extraContent = pending?.extraContent ?? decodeExtraContent(tool.extra_content)
-      latestToolIndex = index
-      nextToolIndex = Math.max(nextToolIndex, index + 1)
-      if (!current && (!id || !name)) {
-        pendingTools = {
-          ...pendingTools,
-          [index]: { id: id || undefined, name: name || undefined, input: text, extraContent },
-        }
-        continue
-      }
-      if (pending) {
-        pendingTools = { ...pendingTools }
-        delete pendingTools[index]
-      }
-      const result = ToolStream.appendOrStart(
+  const reasoning = reasoningDelta(delta, state.reasoningField)
+  const hasLateContent =
+    Boolean(delta?.content) ||
+    Boolean(delta?.refusal) ||
+    reasoning !== undefined ||
+    (Array.isArray(delta?.reasoning_details) && delta.reasoning_details.length > 0) ||
+    toolDeltas.some((tool) => Boolean(tool.id) || Boolean(tool.function?.name) || Boolean(tool.function?.arguments))
+  if (state.finishReason !== undefined) {
+    if (hasLateContent)
+      return ProviderShared.eventError(
         ADAPTER,
-        tools,
-        index,
-        {
-          id: id || undefined,
-          name: name || undefined,
-          text,
-          providerMetadata: extraContent && { [state.providerMetadataKey]: { extraContent } },
-        },
-        "OpenAI Chat tool call delta is missing id or name",
-      )
-      if (ToolStream.isError(result))
-        return yield* new AIError({
-          reason: AIErrorReason.make({
-            ...result.reason,
-            message: result.message,
-            cause: result.reason.cause,
-            body: ProviderShared.encodeJson(event),
-          }),
-        })
-      tools = result.tools
-      if (result.events.length) lifecycle = Lifecycle.stepStart(lifecycle, events)
-      events.push(...result.events)
-    }
-
-    const incompleteTools = finishReason?.normalized === "content-filter" || finishReason?.normalized === "length"
-    if (
-      finishReason !== undefined &&
-      !incompleteTools &&
-      state.finishReason === undefined &&
-      Object.keys(pendingTools).length
-    )
-      return yield* ProviderShared.eventError(
-        ADAPTER,
-        "OpenAI Chat tool call delta is missing id or name",
+        "OpenAI Chat received content after the finish reason",
         ProviderShared.encodeJson(event),
       )
+    return [{ ...state, usage }, events] as const
+  }
 
-    // Filtering or truncation terminates the response without confirming pending tool calls.
-    const finished =
-      finishReason !== undefined &&
-      !incompleteTools &&
-      state.finishReason === undefined &&
-      Object.keys(tools).length > 0
-        ? yield* ToolStream.finishAll(ADAPTER, tools)
-        : undefined
+  const reasoningField = state.reasoningField ?? reasoning?.field
+  const reasoningTextObserved = state.reasoningTextObserved || reasoning !== undefined
+  const detailDelta = Array.isArray(delta?.reasoning_details)
+    ? knownReasoningDetails(delta.reasoning_details)
+    : undefined
+  if (detailDelta !== undefined) appendReasoningDetails(state.reasoningDetails, detailDelta)
+  const reasoningDetailsObserved = state.reasoningDetailsObserved || detailDelta !== undefined
+  const deltaMetadata = reasoningMetadata(state.providerMetadataKey, reasoningField)
+  const text = detailDelta?.length
+    ? (detailText(detailDelta, reasoningTextObserved) ?? reasoning?.text)
+    : reasoning?.text
+  if (text !== undefined) lifecycle = Lifecycle.reasoningDelta(lifecycle, events, "reasoning-0", text, deltaMetadata)
+  else if (
+    reasoningDetailsObserved &&
+    !lifecycle.reasoning.has("reasoning-0") &&
+    (Boolean(delta?.content) || Boolean(delta?.refusal) || toolDeltas.length > 0)
+  )
+    lifecycle = Lifecycle.reasoningStart(lifecycle, events, "reasoning-0", deltaMetadata)
+  const reasoningEmitted = state.reasoningEmitted || lifecycle.reasoning.has("reasoning-0")
 
-    return [
+  // Reasoning is one response-wide channel: it stays open alongside text and
+  // refusal output so late reasoning deltas and details join the same block,
+  // and `finishEvents` closes it once with the complete metadata.
+  if (delta?.content) lifecycle = Lifecycle.textDelta(lifecycle, events, "text-0", delta.content)
+
+  if (delta?.refusal) lifecycle = Lifecycle.textDelta(lifecycle, events, "text-0", delta.refusal)
+
+  // Compatible providers may omit indexes. Prefer durable identity, then use
+  // batch position for parallel deltas or the latest call for sparse chunks.
+  for (const [position, tool] of toolDeltas.entries()) {
+    const matched = toolIndexByID(tools, pendingTools, tool.id || undefined)
+    const fallback = toolDeltas.length > 1 ? position : (latestToolIndex ?? position)
+    const fallbackTool = tools[fallback] ?? pendingTools[fallback]
+    const index =
+      tool.index ?? matched ?? (tool.id && fallbackTool?.id && fallbackTool.id !== tool.id ? nextToolIndex : fallback)
+    const current = tools[index]
+    const pending = pendingTools[index]
+    const id = current?.id ?? pending?.id ?? (tool.id || undefined)
+    const name = current?.name ?? pending?.name ?? (tool.function?.name || undefined)
+    const text = `${pending?.input ?? ""}${tool.function?.arguments ?? ""}`
+    const extraContent = pending?.extraContent ?? decodeExtraContent(tool.extra_content)
+    latestToolIndex = index
+    nextToolIndex = Math.max(nextToolIndex, index + 1)
+    if (!current && (!id || !name)) {
+      pendingTools = {
+        ...pendingTools,
+        [index]: { id: id || undefined, name: name || undefined, input: text, extraContent },
+      }
+      continue
+    }
+    if (pending) {
+      pendingTools = { ...pendingTools }
+      delete pendingTools[index]
+    }
+    const result = ToolStream.appendOrStart(
+      ADAPTER,
+      tools,
+      index,
       {
-        providerMetadataKey: state.providerMetadataKey,
-        tools: finished?.tools ?? tools,
-        pendingTools,
-        toolCallEvents: finished?.events ?? state.toolCallEvents,
-        usage,
-        finishReason,
-        lifecycle,
-        reasoningField,
-        reasoningTextObserved,
-        reasoningDetails: state.reasoningDetails,
-        reasoningDetailsObserved,
-        reasoningEmitted,
-        latestToolIndex,
-        nextToolIndex,
-        requireFinishReason: state.requireFinishReason,
+        id: id || undefined,
+        name: name || undefined,
+        text,
+        providerMetadata: extraContent && { [state.providerMetadataKey]: { extraContent } },
       },
-      events,
-    ] as const
-  })
+      "OpenAI Chat tool call delta is missing id or name",
+    )
+    if (ToolStream.isError(result))
+      return new AIError({
+        reason: AIErrorReason.make({
+          ...result.reason,
+          message: result.message,
+          cause: result.reason.cause,
+          body: ProviderShared.encodeJson(event),
+        }),
+      })
+    tools = result.tools
+    if (result.events.length) lifecycle = Lifecycle.stepStart(lifecycle, events)
+    events.push(...result.events)
+  }
 
-const finishEvents = Effect.fn("OpenAIChat.finishEvents")(function* (state: ParserState) {
+  const incompleteTools = finishReason?.normalized === "content-filter" || finishReason?.normalized === "length"
+  if (
+    finishReason !== undefined &&
+    !incompleteTools &&
+    state.finishReason === undefined &&
+    Object.keys(pendingTools).length
+  )
+    return ProviderShared.eventError(
+      ADAPTER,
+      "OpenAI Chat tool call delta is missing id or name",
+      ProviderShared.encodeJson(event),
+    )
+
+  // Filtering or truncation terminates the response without confirming pending tool calls.
+  const finished =
+    finishReason !== undefined &&
+    !incompleteTools &&
+    state.finishReason === undefined &&
+    Object.keys(tools).length > 0
+      ? ToolStream.finishAll(ADAPTER, tools)
+      : undefined
+  if (ToolStream.isError(finished)) return finished
+
+  return [
+    {
+      providerMetadataKey: state.providerMetadataKey,
+      tools: finished?.tools ?? tools,
+      pendingTools,
+      toolCallEvents: finished?.events ?? state.toolCallEvents,
+      usage,
+      finishReason,
+      lifecycle,
+      reasoningField,
+      reasoningTextObserved,
+      reasoningDetails: state.reasoningDetails,
+      reasoningDetailsObserved,
+      reasoningEmitted,
+      latestToolIndex,
+      nextToolIndex,
+      requireFinishReason: state.requireFinishReason,
+    },
+    events,
+  ] as const
+}
+
+const finishEvents = (state: ParserState) => {
   if (state.finishReason === undefined && state.requireFinishReason)
-    return yield* new AIError({
+    return new AIError({
       reason: new InvalidProviderOutputError({
         message: "OpenAI Chat stream ended without finish_reason",
         classification: "incomplete-stream",
@@ -1224,10 +1227,12 @@ const finishEvents = Effect.fn("OpenAIChat.finishEvents")(function* (state: Pars
       }),
     })
   const events: LLMEvent[] = []
-  const toolCallEvents =
-    state.finishReason === undefined && Object.keys(state.tools).length > 0
-      ? (yield* ToolStream.finishAll(ADAPTER, state.tools)).events
-      : state.toolCallEvents
+  let toolCallEvents = state.toolCallEvents
+  if (state.finishReason === undefined && Object.keys(state.tools).length > 0) {
+    const finished = ToolStream.finishAll(ADAPTER, state.tools)
+    if (ToolStream.isError(finished)) return finished
+    toolCallEvents = finished.events
+  }
   const hasToolCalls = toolCallEvents.length > 0
   const reason = state.finishReason
     ? {
@@ -1257,7 +1262,7 @@ const finishEvents = Effect.fn("OpenAIChat.finishEvents")(function* (state: Pars
   events.push(...toolCallEvents)
   Lifecycle.finish(lifecycle, events, { reason, usage: state.usage })
   return events
-})
+}
 
 // =============================================================================
 // Protocol And OpenAI Route
@@ -1290,7 +1295,7 @@ export const protocol = Protocol.make({
       nextToolIndex: 0,
       requireFinishReason: request.model.compatibility?.requireFinishReason ?? true,
     }),
-    step: (state: ParserState, event) => (event === DONE ? Effect.succeed([state, []] as const) : step(state, event)),
+    step: (state: ParserState, event) => (event === DONE ? ([state, []] as const) : step(state, event)),
     terminal: (event) => event === DONE,
     onHalt: finishEvents,
   },

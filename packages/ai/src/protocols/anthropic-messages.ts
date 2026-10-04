@@ -584,7 +584,7 @@ const serverToolResultType = (name: string): AnthropicServerToolResultType | und
   return undefined
 }
 
-const lowerServerToolResult = Effect.fn("AnthropicMessages.lowerServerToolResult")(function* (
+const lowerServerToolResult = Effect.fnUntraced(function* (
   part: ToolResultPart,
   providerMetadataKey: string,
 ) {
@@ -657,7 +657,7 @@ const citationsFromMetadata = (metadata: MediaPart["metadata"]): AnthropicDocume
 
 const isHttpUrl = (value: string) => /^https?:\/\//i.test(value.trim())
 
-const lowerMedia = Effect.fn("AnthropicMessages.lowerMedia")(function* (
+const lowerMedia = Effect.fnUntraced(function* (
   part: MediaPart,
   breakpoints?: Cache.Breakpoints,
 ) {
@@ -847,7 +847,7 @@ const splitsLocalToolResults = (messages: LLMRequest["messages"], index: number)
   return pending.size > 0
 }
 
-const lowerNativeSystemUpdate = Effect.fn("AnthropicMessages.lowerNativeSystemUpdate")(function* (
+const lowerNativeSystemUpdate = Effect.fnUntraced(function* (
   message: LLMRequest["messages"][number],
   breakpoints: Cache.Breakpoints,
 ) {
@@ -862,7 +862,7 @@ const lowerNativeSystemUpdate = Effect.fn("AnthropicMessages.lowerNativeSystemUp
   }
 })
 
-const lowerMessages = Effect.fn("AnthropicMessages.lowerMessages")(function* (
+const lowerMessages = Effect.fnUntraced(function* (
   request: LLMRequest,
   breakpoints: Cache.Breakpoints,
 ) {
@@ -1300,32 +1300,29 @@ const onContentBlockStart = (
   return [{ ...state, lifecycle: Lifecycle.stepStart(state.lifecycle, events) }, [...events, result]]
 }
 
-const onContentBlockDelta = Effect.fn("AnthropicMessages.onContentBlockDelta")(function* (
+const onContentBlockDelta = (
   state: ParserState,
   event: AnthropicEvent & { readonly delta: AnthropicStreamDelta },
-) {
+): StepResult | AIError => {
   const delta = event.delta
 
   if (delta.type === "compaction_delta") {
     if (event.index === undefined || !(event.index in state.compactions) || delta.content === undefined)
-      return yield* ProviderShared.eventError(ADAPTER, "Compaction delta is missing its block or content")
-    return [
-      { ...state, compactions: { ...state.compactions, [event.index]: delta.content } },
-      NO_EVENTS,
-    ] satisfies StepResult
+      return ProviderShared.eventError(ADAPTER, "Compaction delta is missing its block or content")
+    return [{ ...state, compactions: { ...state.compactions, [event.index]: delta.content } }, NO_EVENTS]
   }
 
   if (delta.type === "text_delta" && delta.text) {
-    if (!state.lifecycle.text.has(`text-${event.index ?? 0}`)) return [state, NO_EVENTS] satisfies StepResult
+    if (!state.lifecycle.text.has(`text-${event.index ?? 0}`)) return [state, NO_EVENTS]
     const events: LLMEvent[] = []
     return [
       { ...state, lifecycle: Lifecycle.textDelta(state.lifecycle, events, `text-${event.index ?? 0}`, delta.text) },
       events,
-    ] satisfies StepResult
+    ]
   }
 
   if (delta.type === "thinking_delta" && delta.thinking) {
-    if (!state.lifecycle.reasoning.has(`reasoning-${event.index ?? 0}`)) return [state, NO_EVENTS] satisfies StepResult
+    if (!state.lifecycle.reasoning.has(`reasoning-${event.index ?? 0}`)) return [state, NO_EVENTS]
     const events: LLMEvent[] = []
     return [
       {
@@ -1333,24 +1330,24 @@ const onContentBlockDelta = Effect.fn("AnthropicMessages.onContentBlockDelta")(f
         lifecycle: Lifecycle.reasoningDelta(state.lifecycle, events, `reasoning-${event.index ?? 0}`, delta.thinking),
       },
       events,
-    ] satisfies StepResult
+    ]
   }
 
   if (delta.type === "signature_delta" && delta.signature) {
     const index = event.index ?? 0
-    if (!state.lifecycle.reasoning.has(`reasoning-${index}`)) return [state, NO_EVENTS] satisfies StepResult
+    if (!state.lifecycle.reasoning.has(`reasoning-${index}`)) return [state, NO_EVENTS]
     return [
       {
         ...state,
         reasoningSignatures: { ...state.reasoningSignatures, [index]: delta.signature },
       },
       NO_EVENTS,
-    ] satisfies StepResult
+    ]
   }
 
   if (delta.type === "input_json_delta" && event.index !== undefined) {
-    if (!delta.partial_json) return [state, NO_EVENTS] satisfies StepResult
-    if (!state.tools[event.index]) return [state, NO_EVENTS] satisfies StepResult
+    if (!delta.partial_json) return [state, NO_EVENTS]
+    if (!state.tools[event.index]) return [state, NO_EVENTS]
     const result = ToolStream.appendExisting(
       ADAPTER,
       state.tools,
@@ -1358,21 +1355,18 @@ const onContentBlockDelta = Effect.fn("AnthropicMessages.onContentBlockDelta")(f
       delta.partial_json,
       "Anthropic Messages tool argument delta is missing its tool call",
     )
-    if (ToolStream.isError(result)) return yield* result
+    if (ToolStream.isError(result)) return result
     const events: LLMEvent[] = []
     const lifecycle = result.events.length ? Lifecycle.stepStart(state.lifecycle, events) : state.lifecycle
     events.push(...result.events)
-    return [{ ...state, lifecycle, tools: result.tools }, events] satisfies StepResult
+    return [{ ...state, lifecycle, tools: result.tools }, events]
   }
 
-  return [state, NO_EVENTS] satisfies StepResult
-})
+  return [state, NO_EVENTS]
+}
 
-const onContentBlockStop = Effect.fn("AnthropicMessages.onContentBlockStop")(function* (
-  state: ParserState,
-  event: AnthropicEvent,
-) {
-  if (event.index === undefined) return [state, NO_EVENTS] satisfies StepResult
+const onContentBlockStop = (state: ParserState, event: AnthropicEvent): StepResult | AIError => {
+  if (event.index === undefined) return [state, NO_EVENTS]
   if (event.index in state.compactions) {
     const { [event.index]: content, ...compactions } = state.compactions
     const events: LLMEvent[] = []
@@ -1383,9 +1377,10 @@ const onContentBlockStop = Effect.fn("AnthropicMessages.onContentBlockStop")(fun
         text: content,
       }),
     )
-    return [{ ...state, compactions, lifecycle }, events] satisfies StepResult
+    return [{ ...state, compactions, lifecycle }, events]
   }
-  const result = yield* ToolStream.finish(ADAPTER, state.tools, event.index)
+  const result = ToolStream.finish(ADAPTER, state.tools, event.index)
+  if (ToolStream.isError(result)) return result
   const events: LLMEvent[] = []
   const resultEvents = result.events ?? []
   const signature = state.reasoningSignatures[event.index]
@@ -1400,8 +1395,8 @@ const onContentBlockStop = Effect.fn("AnthropicMessages.onContentBlockStop")(fun
   events.push(...resultEvents)
   const reasoningSignatures = { ...state.reasoningSignatures }
   delete reasoningSignatures[event.index]
-  return [{ ...state, lifecycle, tools: result.tools, reasoningSignatures }, events] satisfies StepResult
-})
+  return [{ ...state, lifecycle, tools: result.tools, reasoningSignatures }, events]
+}
 
 const onMessageDelta = (
   state: ParserState,
@@ -1439,10 +1434,11 @@ const onMessageDelta = (
   ]
 }
 
-const onMessageStop = Effect.fn("AnthropicMessages.onMessageStop")(function* (state: ParserState) {
+const onMessageStop = (state: ParserState): StepResult | AIError => {
   if (Object.keys(state.compactions).length)
-    return yield* ProviderShared.eventError(ADAPTER, "Response ended with an incomplete compaction block")
-  const result = yield* ToolStream.finishAll(ADAPTER, state.tools)
+    return ProviderShared.eventError(ADAPTER, "Response ended with an incomplete compaction block")
+  const result = ToolStream.finishAll(ADAPTER, state.tools)
+  if (ToolStream.isError(result)) return result
   const events: LLMEvent[] = []
   const lifecycle = result.events.length ? Lifecycle.stepStart(state.lifecycle, events) : state.lifecycle
   events.push(...result.events)
@@ -1464,8 +1460,8 @@ const onMessageStop = Effect.fn("AnthropicMessages.onMessageStop")(function* (st
     usage: state.usage,
     providerMetadata: state.pendingFinish?.providerMetadata,
   })
-  return [{ ...state, lifecycle: finished, tools: result.tools }, events] satisfies StepResult
-})
+  return [{ ...state, lifecycle: finished, tools: result.tools }, events]
+}
 
 // Prefix `error.type` so overloads, rate limits, and quota errors are visible
 // even when the provider message is generic or empty.
@@ -1479,11 +1475,9 @@ const providerErrorMessage = (event: AnthropicEvent): string => {
 const onError = (event: AnthropicEvent) => {
   const message = providerErrorMessage(event)
   const body = ProviderShared.encodeJson(event)
-  return Effect.fail(
-    new AIError({
-      reason: classifyProviderFailure({ message, rawBody: body }),
-    }),
-  )
+  return new AIError({
+    reason: classifyProviderFailure({ message, rawBody: body }),
+  })
 }
 
 const STREAM_BLOCK_TYPES = new Set([
@@ -1503,16 +1497,14 @@ const STREAM_DELTA_TYPES = new Set([
 ])
 
 const invalidStreamEvent = (event: AnthropicEvent) =>
-  Effect.fail(
-    ProviderShared.eventError(
-      ADAPTER,
-      "Invalid anthropic/anthropic-messages stream event",
-      ProviderShared.encodeJson(event),
-    ),
+  ProviderShared.eventError(
+    ADAPTER,
+    "Invalid anthropic/anthropic-messages stream event",
+    ProviderShared.encodeJson(event),
   )
 
-const step = (state: ParserState, event: AnthropicEvent) => {
-  if (!SSE_EVENTS.has(event.type)) return Effect.succeed<StepResult>([state, NO_EVENTS])
+const step = (state: ParserState, event: AnthropicEvent): StepResult | AIError => {
+  if (!SSE_EVENTS.has(event.type)) return [state, NO_EVENTS]
   if (
     event.type !== "content_block_start" &&
     event.content_block !== undefined &&
@@ -1525,35 +1517,29 @@ const step = (state: ParserState, event: AnthropicEvent) => {
     Option.isNone(decodeAnthropicStreamDelta(event.delta))
   )
     return invalidStreamEvent(event)
-  if (event.type === "message_start") return Effect.succeed(onMessageStart(state, event))
+  if (event.type === "message_start") return onMessageStart(state, event)
   if (event.type === "content_block_start") {
     if (!ProviderShared.isRecord(event.content_block) || typeof event.content_block.type !== "string")
       return invalidStreamEvent(event)
     if (event.content_block.type === "compaction") {
       const decoded = Schema.decodeUnknownOption(AnthropicCompactionBlock)(event.content_block)
       if (event.index === undefined || Option.isNone(decoded)) return invalidStreamEvent(event)
-      return Effect.succeed<StepResult>([
-        { ...state, compactions: { ...state.compactions, [event.index]: decoded.value.content } },
-        NO_EVENTS,
-      ])
+      return [{ ...state, compactions: { ...state.compactions, [event.index]: decoded.value.content } }, NO_EVENTS]
     }
     if (!STREAM_BLOCK_TYPES.has(event.content_block.type) && !isServerToolResultType(event.content_block.type))
-      return Effect.succeed<StepResult>([state, NO_EVENTS])
+      return [state, NO_EVENTS]
     const decoded = decodeAnthropicStreamBlock(event.content_block)
     if (Option.isNone(decoded)) return invalidStreamEvent(event)
     const block = decoded.value
     if (block.type === "tool_use" || block.type === "server_tool_use") {
-      if (event.index === undefined)
-        return Effect.fail(ProviderShared.eventError(ADAPTER, `Anthropic ${block.type} missing index`))
-      if (!block.id)
-        return Effect.fail(ProviderShared.eventError(ADAPTER, `Anthropic tool_use missing id at index ${event.index}`))
+      if (event.index === undefined) return ProviderShared.eventError(ADAPTER, `Anthropic ${block.type} missing index`)
+      if (!block.id) return ProviderShared.eventError(ADAPTER, `Anthropic tool_use missing id at index ${event.index}`)
     }
-    return Effect.succeed(onContentBlockStart(state, { ...event, content_block: block }))
+    return onContentBlockStart(state, { ...event, content_block: block })
   }
   if (event.type === "content_block_delta") {
     if (!ProviderShared.isRecord(event.delta)) return invalidStreamEvent(event)
-    if (typeof event.delta.type === "string" && !STREAM_DELTA_TYPES.has(event.delta.type))
-      return Effect.succeed<StepResult>([state, NO_EVENTS])
+    if (typeof event.delta.type === "string" && !STREAM_DELTA_TYPES.has(event.delta.type)) return [state, NO_EVENTS]
     const decoded = decodeAnthropicStreamDelta(event.delta)
     if (Option.isNone(decoded)) return invalidStreamEvent(event)
     return onContentBlockDelta(state, { ...event, delta: decoded.value })
@@ -1562,11 +1548,11 @@ const step = (state: ParserState, event: AnthropicEvent) => {
   if (event.type === "message_delta") {
     const decoded = decodeAnthropicStreamDelta(event.delta)
     if (Option.isNone(decoded)) return invalidStreamEvent(event)
-    return Effect.succeed(onMessageDelta(state, { ...event, delta: decoded.value }))
+    return onMessageDelta(state, { ...event, delta: decoded.value })
   }
   if (event.type === "message_stop") return onMessageStop(state)
   if (event.type === "error") return onError(event)
-  return Effect.succeed<StepResult>([state, NO_EVENTS])
+  return [state, NO_EVENTS]
 }
 
 // =============================================================================

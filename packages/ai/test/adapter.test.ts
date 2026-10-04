@@ -64,7 +64,7 @@ const fakeProtocol = Protocol.make<FakeBody, FakeEvent, FakeEvent, void>({
   stream: {
     event: FakeEvent,
     initial: () => undefined,
-    step: (state, event) => Effect.succeed([state, [raiseEvent(event)]] as const),
+    step: (state, event) => [state, [raiseEvent(event)]] as const,
   },
 })
 

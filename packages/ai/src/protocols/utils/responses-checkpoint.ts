@@ -1,7 +1,7 @@
 import { Effect, Schema, Stream } from "effect"
 import { Route, type RouteBody, type TriggerCompactOperation } from "../../route/client.js"
 import { Protocol } from "../../route/protocol.js"
-import { CompactionCheckpointResponse, LLMEvent, LLMRequest } from "../../schema/index.js"
+import { AIError, CompactionCheckpointResponse, LLMEvent, LLMRequest } from "../../schema/index.js"
 import { OpenResponses } from "../open-responses.js"
 import { ProviderShared } from "../shared.js"
 
@@ -11,10 +11,7 @@ interface State {
   readonly responseID?: string
 }
 
-const onOutputItem = Effect.fn("ResponsesCheckpoint.onOutputItem")(function* (
-  state: State,
-  input: OpenResponses.Event,
-) {
+const onOutputItem = (state: State, input: OpenResponses.Event): State | AIError => {
   const event = OpenResponses.normalize(state.parser, input)
   const item = event.item
   if (!item) return state
@@ -30,12 +27,12 @@ const onOutputItem = Effect.fn("ResponsesCheckpoint.onOutputItem")(function* (
       ([index, id]) => id === item.id && Number(index) !== event.output_index,
     )
   )
-    return yield* ProviderShared.eventError(parser.id, "Compaction checkpoint appeared in multiple output slots")
+    return ProviderShared.eventError(parser.id, "Compaction checkpoint appeared in multiple output slots")
   if (!item.encrypted_content)
-    return yield* ProviderShared.eventError(parser.id, "Compaction output is missing its encrypted content")
+    return ProviderShared.eventError(parser.id, "Compaction output is missing its encrypted content")
   const previous = state.checkpoints[item.id]
   if (previous && previous.encrypted !== item.encrypted_content)
-    return yield* ProviderShared.eventError(parser.id, "Compaction output changed after completion")
+    return ProviderShared.eventError(parser.id, "Compaction output changed after completion")
   if (previous) return next
   return {
     ...next,
@@ -43,8 +40,8 @@ const onOutputItem = Effect.fn("ResponsesCheckpoint.onOutputItem")(function* (
       ...state.checkpoints,
       [item.id]: { type: "compaction", provider: parser.provider, id: item.id, encrypted: item.encrypted_content },
     },
-  } satisfies State
-})
+  }
+}
 
 /** Collect a trigger response before acknowledging transport completion. No generation output escapes. */
 export const make = <Body>(body: RouteBody<Body>): TriggerCompactOperation =>
@@ -63,30 +60,34 @@ export const make = <Body>(body: RouteBody<Body>): TriggerCompactOperation =>
           checkpoints: {},
         }),
         terminal: OpenResponses.terminal,
-        step: Effect.fn("ResponsesCheckpoint.step")(function* (state: State, event: OpenResponses.Event) {
+        step: (state: State, event: OpenResponses.Event) => {
           if (event.response?.id && state.responseID && event.response.id !== state.responseID)
-            return yield* ProviderShared.eventError(source.id, "Compaction response ID changed during execution")
+            return ProviderShared.eventError(source.id, "Compaction response ID changed during execution")
           if (event.type === "response.created") return [{ ...state, responseID: event.response?.id }, []] as const
           if (event.type === "error" || event.type === "response.failed")
-            return yield* OpenResponses.providerFailure(event, "Compaction request failed")
+            return OpenResponses.providerFailure(event, "Compaction request failed")
           if (event.type === "response.incomplete")
-            return yield* ProviderShared.eventError(source.id, "Compaction response was incomplete")
-          if (event.type === "response.output_item.added" || event.type === "response.output_item.done")
-            return [yield* onOutputItem(state, event), []] as const
+            return ProviderShared.eventError(source.id, "Compaction response was incomplete")
+          if (event.type === "response.output_item.added" || event.type === "response.output_item.done") {
+            const next = onOutputItem(state, event)
+            return next instanceof AIError ? next : ([next, []] as const)
+          }
           if (event.type !== "response.completed") return [state, []] as const
           const responseID = event.response?.id
           if (!responseID?.trim())
-            return yield* ProviderShared.eventError(source.id, "Compaction response is missing its response ID")
+            return ProviderShared.eventError(source.id, "Compaction response is missing its response ID")
           if (event.response?.status !== undefined && event.response.status !== "completed")
-            return yield* ProviderShared.eventError(source.id, "Compaction response did not complete successfully")
+            return ProviderShared.eventError(source.id, "Compaction response did not complete successfully")
           let next = state
           for (const [index, item] of (event.response?.output ?? []).entries()) {
-            next = yield* onOutputItem(next, { type: "response.output_item.done", output_index: index, item })
+            const updated = onOutputItem(next, { type: "response.output_item.done", output_index: index, item })
+            if (updated instanceof AIError) return updated
+            next = updated
           }
           const checkpoints = Object.values(next.checkpoints)
           const checkpoint = checkpoints[0]
           if (checkpoints.length !== 1 || !checkpoint)
-            return yield* ProviderShared.eventError(
+            return ProviderShared.eventError(
               source.id,
               "Compaction response must contain exactly one checkpoint",
             )
@@ -96,7 +97,7 @@ export const make = <Body>(body: RouteBody<Body>): TriggerCompactOperation =>
             usage: OpenResponses.mapUsage(event.response?.usage, OpenResponses.metadataKey(request.model)),
           })
           return [next, [LLMEvent.finish({ reason: { normalized: "stop" } })]] as const
-        }),
+        },
       },
     })
     const route = Route.make({

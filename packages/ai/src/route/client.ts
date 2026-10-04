@@ -1,4 +1,4 @@
-import { Cause, Context, Effect, Layer, Schema, Stream } from "effect"
+import { Cause, Context, Effect, Layer, Result, Schema, Stream } from "effect"
 import { Auth } from "./auth.js"
 import { Endpoint, type EndpointPatch } from "./endpoint.js"
 import { RequestExecutor } from "./executor.js"
@@ -338,38 +338,11 @@ const incompleteStreamError = (route: string) =>
     }),
   })
 
-const requireTerminalEvent = (route: string) => (events: Stream.Stream<LLMEvent, AIError>) =>
-  Stream.suspend(() => {
-    let terminal = false
-    return events.pipe(
-      Stream.mapEffect((event) => {
-        if (terminal)
-          return Effect.fail(
-            ProviderShared.eventError(route, `Provider emitted ${event.type} after the terminal event`),
-          )
-        if (LLMEvent.is.finish(event) || LLMEvent.is.providerError(event)) terminal = true
-        return Effect.succeed(event)
-      }),
-      Stream.onEnd(Effect.suspend(() => (terminal ? Effect.void : Effect.fail(incompleteStreamError(route))))),
-    )
-  })
-
 function makeFromTransport<Body, Prepared, Frame, Event, State>(
   input: MakeTransportInput<Body, Prepared, Frame, Event, State>,
 ): Route<Body, Prepared> {
   const protocol = input.protocol
-  const decodeEventEffect = Schema.decodeUnknownEffect(protocol.stream.event)
-  const decodeEvent = (route: string) => (frame: Frame) =>
-    decodeEventEffect(frame).pipe(
-      Effect.mapError((cause) =>
-        ProviderShared.eventError(
-          input.id,
-          `Invalid ${route} stream event`,
-          typeof frame === "string" ? frame : ProviderShared.encodeJson(frame),
-          cause,
-        ),
-      ),
-    )
+  const decodeEvent = Schema.decodeUnknownResult(protocol.stream.event)
 
   type BuiltRouteInput = Omit<MakeTransportInput<Body, Prepared, Frame, Event, State>, "defaults"> & {
     readonly defaults?: RouteDefaults
@@ -442,46 +415,64 @@ function makeFromTransport<Body, Prepared, Frame, Event, State>(
                             (typeof frame === "string" ? frame : ProviderShared.encodeJson(frame))),
                     }),
                   })
-              const events = execution.frames.pipe(
-                Stream.mapEffect((frame) =>
-                  decodeEvent(route)(frame).pipe(
-                    Effect.catchCause((cause) =>
-                      Effect.fail(streamError(route, `Failed to decode ${route} event`, cause)),
-                    ),
-                    Effect.map((event) => ({ event, frame })),
-                    Effect.mapError(frameError(frame)),
-                  ),
-                ),
-                terminal ? Stream.takeUntil(({ event }) => terminal(event)) : (stream) => stream,
-              )
               const stream = Stream.suspend(() => {
                 let state = protocol.stream.initial(request)
-                const parsed = events.pipe(
-                  Stream.mapEffect(({ event, frame }) =>
-                    protocol.stream.step(state, event).pipe(
-                      Effect.catchCause((cause) =>
-                        Effect.fail(streamError(route, `Failed to parse ${route} event`, cause)),
-                      ),
-                      Effect.map(([next, output]) => {
-                        state = next
-                        return output
-                      }),
-                      Effect.mapError(frameError(frame, event)),
-                    ),
-                  ),
-                  Stream.flatMap(Stream.fromIterable),
+                let seenTerminal = false
+                let stopAfterFrame = false
+                const trackTerminal = (output: ReadonlyArray<LLMEvent>) => {
+                  for (const item of output) {
+                    if (seenTerminal)
+                      return Effect.fail(
+                        ProviderShared.eventError(route, `Provider emitted ${item.type} after the terminal event`),
+                      )
+                    if (LLMEvent.is.finish(item) || LLMEvent.is.providerError(item)) seenTerminal = true
+                  }
+                  return Effect.succeed(output)
+                }
+                const parsed = execution.frames.pipe(
+                  Stream.mapEffect((frame) => {
+                    const decoded = decodeEvent(frame)
+                    if (Result.isFailure(decoded))
+                      return Effect.fail(
+                        frameError(frame)(
+                          ProviderShared.eventError(
+                            input.id,
+                            `Invalid ${route} stream event`,
+                            typeof frame === "string" ? frame : ProviderShared.encodeJson(frame),
+                            decoded.failure,
+                          ),
+                        ),
+                      )
+                    const event = decoded.success
+                    if (terminal?.(event)) stopAfterFrame = true
+                    const stepped = protocol.stream.step(state, event)
+                    if (stepped instanceof AIError) return Effect.fail(frameError(frame, event)(stepped))
+                    state = stepped[0]
+                    return trackTerminal(stepped[1]).pipe(Effect.mapError(frameError(frame, event)))
+                  }),
+                  terminal ? Stream.takeUntil(() => stopAfterFrame) : (stream) => stream,
+                  Stream.flattenIterable,
                 )
                 const onHalt = protocol.stream.onHalt
-                return onHalt
+                const withHalt = onHalt
                   ? parsed.pipe(
                       Stream.concat(
-                        Stream.suspend(() => Stream.unwrap(onHalt(state).pipe(Effect.map(Stream.fromIterable)))),
+                        Stream.suspend(() => {
+                          const halted = onHalt(state)
+                          return Stream.fromIterableEffect(
+                            halted instanceof AIError ? Effect.fail(halted) : trackTerminal(halted),
+                          )
+                        }),
                       ),
                     )
                   : parsed
+                return withHalt.pipe(
+                  Stream.onEnd(
+                    Effect.suspend(() => (seenTerminal ? Effect.void : Effect.fail(incompleteStreamError(route)))),
+                  ),
+                )
               }).pipe(
                 Stream.catchCause((cause) => Stream.fail(streamError(route, `Failed to read ${route} stream`, cause))),
-                requireTerminalEvent(route),
                 Stream.mapError(
                   (error) =>
                     new AIError({

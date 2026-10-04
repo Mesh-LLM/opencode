@@ -1,6 +1,6 @@
-import { Effect, Encoding, Schema } from "effect"
+import { Effect, Encoding, Result, Schema } from "effect"
 import { Protocol } from "../route/protocol.js"
-import { LLMEvent, LLMRequest, Message, ToolResultPart } from "../schema/index.js"
+import { AIError, LLMEvent, LLMRequest, Message, ToolResultPart } from "../schema/index.js"
 import { OpenResponses } from "./open-responses.js"
 import { JsonObject, optionalArray, optionalNull, ProviderShared } from "./shared.js"
 import { ResponsesHostedTools } from "./utils/responses-hosted-tools.js"
@@ -90,72 +90,68 @@ const fromRequest = Effect.fn("MetaResponses.fromRequest")(function* (request: L
   )
 })
 
+const decodeImageItem = Schema.decodeUnknownResult(ImageItem)
+const decodeMessageAnnotations = Schema.decodeUnknownResult(MessageAnnotations)
+
 const HOSTED_TOOLS = {
   web_search_call: { name: "web_search", input: (item) => item.action ?? {} },
   image_generation_call: {
     name: "image_generation",
     input: () => ({}),
-    result: Effect.fn("MetaResponses.imageResult")(function* (raw: ResponsesHostedTools.Item) {
-      const item = yield* Schema.decodeUnknownEffect(ImageItem)(raw).pipe(
-        Effect.mapError((cause) =>
-          ProviderShared.eventError(
-            ADAPTER,
-            "Meta returned an invalid image item",
-            ProviderShared.encodeJson(raw),
-            cause,
-          ),
-        ),
-      )
+    result: (raw: ResponsesHostedTools.Item) => {
+      const decoded = decodeImageItem(raw)
+      if (Result.isFailure(decoded))
+        return ProviderShared.eventError(
+          ADAPTER,
+          "Meta returned an invalid image item",
+          ProviderShared.encodeJson(raw),
+          decoded.failure,
+        )
+      const item = decoded.success
       if (item.error !== undefined && item.error !== null) return { type: "error" as const, value: item.error }
       if (!item.result)
-        return yield* ProviderShared.eventError(
+        return ProviderShared.eventError(
           ADAPTER,
           "Meta returned an image without data",
           ProviderShared.encodeJson(raw),
         )
-      const data = yield* Effect.fromResult(Encoding.decodeBase64(item.result)).pipe(
-        Effect.mapError((cause) =>
-          ProviderShared.eventError(
-            ADAPTER,
-            "Meta returned invalid image base64",
-            ProviderShared.encodeJson(raw),
-            cause,
-          ),
-        ),
-      )
+      const data = Encoding.decodeBase64(item.result)
+      if (Result.isFailure(data))
+        return ProviderShared.eventError(
+          ADAPTER,
+          "Meta returned invalid image base64",
+          ProviderShared.encodeJson(raw),
+          data.failure,
+        )
       // Responses image items can omit output_format, including when PNG/JPEG was requested.
       const mime =
         item.output_format === undefined
-          ? (detectMediaType(data) ?? "application/octet-stream")
+          ? (detectMediaType(data.success) ?? "application/octet-stream")
           : `image/${item.output_format}`
       return {
         type: "content" as const,
         value: [{ type: "file" as const, uri: `data:${mime};base64,${item.result}`, mime }],
       }
-    }),
+    },
   },
 } satisfies ResponsesHostedTools.Definitions
 
-const onEvent = Effect.fn("MetaResponses.onEvent")(function* (
-  state: OpenResponses.ParserState,
-  input: OpenResponses.Event,
-) {
+const onEvent = (state: OpenResponses.ParserState, input: OpenResponses.Event): OpenResponses.StepResult | AIError => {
   const event = OpenResponses.normalize(state, input)
   if (event.type === "response.output_item.done" && event.item && ResponsesHostedTools.isItem(event.item, HOSTED_TOOLS))
-    return yield* ResponsesHostedTools.onDone(state, event.item, HOSTED_TOOLS)
-  const result = yield* OpenResponses.step(state, event)
+    return ResponsesHostedTools.onDone(state, event.item, HOSTED_TOOLS)
+  const result = OpenResponses.step(state, event)
+  if (result instanceof AIError) return result
   if (event.type !== "response.output_item.done" || event.item?.type !== "message") return result
-  const message = yield* Schema.decodeUnknownEffect(MessageAnnotations)(event.item).pipe(
-    Effect.mapError((cause) =>
-      ProviderShared.eventError(
-        ADAPTER,
-        "Meta returned invalid message annotations",
-        ProviderShared.encodeJson(event),
-        cause,
-      ),
-    ),
-  )
-  const annotations = message.content.flatMap((part) => part.annotations ?? [])
+  const message = decodeMessageAnnotations(event.item)
+  if (Result.isFailure(message))
+    return ProviderShared.eventError(
+      ADAPTER,
+      "Meta returned invalid message annotations",
+      ProviderShared.encodeJson(event),
+      message.failure,
+    )
+  const annotations = message.success.content.flatMap((part) => part.annotations ?? [])
   if (annotations.length === 0) return result
   return [
     result[0],
@@ -170,10 +166,10 @@ const onEvent = Effect.fn("MetaResponses.onEvent")(function* (
           })
         : item,
     ),
-  ] satisfies OpenResponses.StepResult
-})
+  ]
+}
 
-const step = Effect.fn("MetaResponses.step")(function* (state: ParserState, input: OpenResponses.Event) {
+const step = (state: ParserState, input: OpenResponses.Event) => {
   const completedItems = new Set(state.completedItems)
   const event = OpenResponses.normalize(state, input)
   if (event.type === "response.output_item.done" && event.item && completedItems.has(event.item.id))
@@ -187,16 +183,18 @@ const step = Effect.fn("MetaResponses.step")(function* (state: ParserState, inpu
       const done = OpenResponses.normalize(current, { type: "response.output_item.done", item, output_index: index })
       // Spark changes reasoning IDs in the terminal snapshot; output indices still identify the streamed items.
       if (!done.item || completedItems.has(done.item.id) || completedItems.has(state.outputItems[index] ?? "")) continue
-      const result = yield* onEvent(current, done)
+      const result = onEvent(current, done)
+      if (result instanceof AIError) return result
       current = result[0]
       events.push(...result[1])
       completedItems.add(done.item.id)
     }
   }
-  const result = yield* onEvent(current, event)
+  const result = onEvent(current, event)
+  if (result instanceof AIError) return result
   if (event.type === "response.output_item.done" && event.item) completedItems.add(event.item.id)
   return [{ ...result[0], completedItems }, [...events, ...result[1]]] as const
-})
+}
 
 export const protocol = Protocol.make({
   id: ADAPTER,

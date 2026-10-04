@@ -1,4 +1,4 @@
-import { Effect, Encoding, Schema } from "effect"
+import { Effect, Encoding, Result, Schema } from "effect"
 import { Headers } from "effect/unstable/http"
 import { Route } from "../route/client.js"
 import { Auth } from "../route/auth.js"
@@ -157,7 +157,7 @@ const nativeImageTool = (tool: ToolDefinition) => {
   return Schema.is(OpenAIResponsesImageGenerationTool)(native) ? native : undefined
 }
 
-const lowerTool = Effect.fn("OpenAIResponses.lowerTool")(function* (tool: ToolDefinition) {
+const lowerTool = Effect.fnUntraced(function* (tool: ToolDefinition) {
   const native = nativeImageToolInput(tool)
   if (native !== undefined) {
     if (Schema.is(OpenAIResponsesImageGenerationTool)(native)) return native
@@ -168,7 +168,7 @@ const lowerTool = Effect.fn("OpenAIResponses.lowerTool")(function* (tool: ToolDe
 
 // Native namespaces hold only function tools, so deeper levels flatten into
 // the leaf names the same way non-native protocols flatten the whole tree.
-const lowerToolEntry = Effect.fn("OpenAIResponses.lowerToolEntry")(function* (tool: ToolEntry) {
+const lowerToolEntry = Effect.fnUntraced(function* (tool: ToolEntry) {
   if (tool.type === "tool") return yield* lowerTool(tool)
   // OpenAI requires a namespace description; fall back to a generic one so a
   // missing description never blocks the request.
@@ -237,14 +237,17 @@ const checkpointBody = {
   }),
 }
 
-const hostedToolResult = Effect.fn("OpenAIResponses.hostedToolResult")(function* (item: ResponsesHostedTools.Item) {
+const hostedToolResult = (item: ResponsesHostedTools.Item) => {
   const isError = item.error !== undefined && item.error !== null
   if (item.type === "image_generation_call" && item.result) {
-    yield* Effect.fromResult(Encoding.decodeBase64(item.result)).pipe(
-      Effect.mapError((cause) =>
-        ProviderShared.eventError(ADAPTER, "OpenAI Responses returned invalid image base64", undefined, cause),
-      ),
-    )
+    const decoded = Encoding.decodeBase64(item.result)
+    if (Result.isFailure(decoded))
+      return ProviderShared.eventError(
+        ADAPTER,
+        "OpenAI Responses returned invalid image base64",
+        undefined,
+        decoded.failure,
+      )
     const format = item.output_format ?? "png"
     return {
       type: "content" as const,
@@ -258,7 +261,7 @@ const hostedToolResult = Effect.fn("OpenAIResponses.hostedToolResult")(function*
     }
   }
   return isError ? { type: "error" as const, value: item.error } : { type: "json" as const, value: item }
-})
+}
 
 const HOSTED_TOOLS = {
   web_search_call: { name: "web_search", input: (item) => item.action ?? {} },
@@ -280,7 +283,7 @@ const step = (state: OpenResponses.ParserState, input: OpenResponses.Event) => {
   const event = OpenResponses.normalize(state, input)
   if (event.type === "response.reasoning_text.delta")
     return event.item_id !== undefined
-      ? Effect.succeed(OpenResponses.onReasoningDelta(state, event, event.item_id))
+      ? OpenResponses.onReasoningDelta(state, event, event.item_id)
       : ProviderShared.eventError(ADAPTER, `${event.type} is missing item_id`)
   if (event.type === "response.output_item.done" && event.item && ResponsesHostedTools.isItem(event.item, HOSTED_TOOLS))
     return ResponsesHostedTools.onDone(state, event.item, HOSTED_TOOLS)

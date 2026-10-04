@@ -226,7 +226,7 @@ const MistralEvent = Schema.StructWithRest(
 type MistralEvent = Schema.Schema.Type<typeof MistralEvent>
 const MistralStreamEvent = Schema.Union([Schema.Literal(DONE), Protocol.jsonEvent(MistralEvent)])
 
-const lowerMedia = Effect.fn("MistralChat.lowerMedia")(function* (part: MediaPart) {
+const lowerMedia = Effect.fnUntraced(function* (part: MediaPart) {
   const mime = part.media.mediaType.toLowerCase()
   const url =
     ProviderShared.mediaUrl(part.media) ??
@@ -236,7 +236,7 @@ const lowerMedia = Effect.fn("MistralChat.lowerMedia")(function* (part: MediaPar
   return yield* ProviderShared.invalidRequest(`Mistral Chat does not support media type ${part.media.mediaType}`)
 })
 
-const lowerUser = Effect.fn("MistralChat.lowerUser")(function* (message: LLMRequest["messages"][number]) {
+const lowerUser = Effect.fnUntraced(function* (message: LLMRequest["messages"][number]) {
   const content: MistralUserContent[] = []
   for (const part of message.content) {
     if (part.type === "text") {
@@ -260,7 +260,7 @@ const lowerToolCall = (part: ToolCallPart, normalizeID: (id: string) => string):
   function: { name: part.name, arguments: ProviderShared.encodeJson(part.input) },
 })
 
-const lowerAssistant = Effect.fn("MistralChat.lowerAssistant")(function* (
+const lowerAssistant = Effect.fnUntraced(function* (
   message: LLMRequest["messages"][number],
   normalizeID: (id: string) => string,
   prefix: boolean,
@@ -298,7 +298,7 @@ const lowerAssistant = Effect.fn("MistralChat.lowerAssistant")(function* (
   }
 })
 
-const lowerToolResults = Effect.fn("MistralChat.lowerToolResults")(function* (
+const lowerToolResults = Effect.fnUntraced(function* (
   message: LLMRequest["messages"][number],
   normalizeID: (id: string) => string,
 ) {
@@ -335,7 +335,7 @@ const lowerToolResults = Effect.fn("MistralChat.lowerToolResults")(function* (
   return output
 })
 
-const lowerMessages = Effect.fn("MistralChat.lowerMessages")(function* (request: LLMRequest) {
+const lowerMessages = Effect.fnUntraced(function* (request: LLMRequest) {
   const normalizeID = MistralToolID.normalizer(request)
   const messages: MistralMessage[] =
     request.system.length === 0
@@ -596,11 +596,11 @@ const toolText = (tool: MistralToolDelta) => {
   return value === null || value === undefined ? "" : ProviderShared.encodeJson(value)
 }
 
-const appendTools = Effect.fn("MistralChat.appendTools")(function* (
+const appendTools = (
   initial: ParserState,
   events: LLMEvent[],
   deltas: ReadonlyArray<MistralToolDelta>,
-) {
+): ParserState | AIError => {
   if (deltas.length === 0) return initial
   let state = closeActive(initial, events)
   for (const [position, delta] of deltas.entries()) {
@@ -637,7 +637,7 @@ const appendTools = Effect.fn("MistralChat.appendTools")(function* (
       { id: normalized.id, name, text },
       "Mistral Chat tool call delta is missing a name",
     )
-    if (ToolStream.isError(result)) return yield* result
+    if (ToolStream.isError(result)) return result
     if (result.events.length > 0) state = { ...state, lifecycle: Lifecycle.stepStart(state.lifecycle, events) }
     events.push(...result.events)
     const pendingTools = { ...state.pendingTools }
@@ -651,7 +651,7 @@ const appendTools = Effect.fn("MistralChat.appendTools")(function* (
     }
   }
   return state
-})
+}
 
 const hasLateContent = (event: MistralEvent) => {
   const delta = event.choices?.[0]?.delta
@@ -662,10 +662,10 @@ const hasLateContent = (event: MistralEvent) => {
   )
 }
 
-const step = Effect.fn("MistralChat.step")(function* (state: ParserState, event: MistralEvent) {
+const step = (state: ParserState, event: MistralEvent) => {
   if (event.error) {
     const body = ProviderShared.encodeJson(event)
-    return yield* new AIError({
+    return new AIError({
       reason: classifyProviderFailure({
         message: event.error.message,
         status: typeof event.error.code === "number" ? event.error.code : undefined,
@@ -677,7 +677,7 @@ const step = Effect.fn("MistralChat.step")(function* (state: ParserState, event:
   const usage = mapUsage(event.usage) ?? state.usage
   if (state.finishReason) {
     if (hasLateContent(event))
-      return yield* ProviderShared.eventError(
+      return ProviderShared.eventError(
         ADAPTER,
         "Mistral Chat received content after the finish reason",
         ProviderShared.encodeJson(event),
@@ -686,7 +686,8 @@ const step = Effect.fn("MistralChat.step")(function* (state: ParserState, event:
   }
   const choice = event.choices?.[0]
   const withContent = choice?.delta?.content == null ? state : appendContent(state, events, choice.delta.content)
-  const withTools = yield* appendTools(withContent, events, choice?.delta?.tool_calls ?? [])
+  const withTools = appendTools(withContent, events, choice?.delta?.tool_calls ?? [])
+  if (withTools instanceof AIError) return withTools
   if (!choice?.finish_reason) return [{ ...withTools, usage }, events] as const
 
   const finishReason = {
@@ -698,22 +699,23 @@ const step = Effect.fn("MistralChat.step")(function* (state: ParserState, event:
       message: `Mistral Chat stopped with ${finishReason.raw}`,
       body: ProviderShared.encodeJson(event),
     }
-    return yield* new AIError({
+    return new AIError({
       reason:
         finishReason.raw === "network_error" ? new ProviderInternalError(details) : new UnknownProviderError(details),
     })
   }
   const incomplete = finishReason.normalized === "length" || finishReason.normalized === "content-filter"
   if (!incomplete && Object.keys(withTools.pendingTools).length > 0)
-    return yield* ProviderShared.eventError(
+    return ProviderShared.eventError(
       ADAPTER,
       "Mistral Chat tool call delta is missing a name",
       ProviderShared.encodeJson(event),
     )
   const finished =
     !incomplete && Object.keys(withTools.tools).length > 0
-      ? yield* ToolStream.finishAll(ADAPTER, withTools.tools)
+      ? ToolStream.finishAll(ADAPTER, withTools.tools)
       : undefined
+  if (ToolStream.isError(finished)) return finished
   return [
     {
       ...withTools,
@@ -724,11 +726,11 @@ const step = Effect.fn("MistralChat.step")(function* (state: ParserState, event:
     },
     events,
   ] as const
-})
+}
 
-const finishEvents = Effect.fn("MistralChat.finishEvents")(function* (state: ParserState) {
+const finishEvents = (state: ParserState) => {
   if (!state.finishReason)
-    return yield* new AIError({
+    return new AIError({
       reason: new InvalidProviderOutputError({
         message: "Mistral Chat stream ended without finish_reason",
         classification: "incomplete-stream",
@@ -745,7 +747,7 @@ const finishEvents = Effect.fn("MistralChat.finishEvents")(function* (state: Par
       : state.finishReason
   Lifecycle.finish(lifecycle, events, { reason, usage: closed.usage })
   return events
-})
+}
 
 export const protocol = Protocol.make({
   id: ADAPTER,
@@ -762,7 +764,7 @@ export const protocol = Protocol.make({
       lifecycle: Lifecycle.initial(),
       nextContent: 0,
     }),
-    step: (state: ParserState, event) => (event === DONE ? Effect.succeed([state, []] as const) : step(state, event)),
+    step: (state: ParserState, event) => (event === DONE ? ([state, []] as const) : step(state, event)),
     terminal: (event) => event === DONE,
     onHalt: finishEvents,
   },
