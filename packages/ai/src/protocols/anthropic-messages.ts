@@ -812,15 +812,9 @@ const supportsNativeSystemUpdates = (request: LLMRequest) => {
   return version.major >= 5
 }
 
-const endsInServerToolUse = (message: LLMRequest["messages"][number]) => {
-  const last = message.content.at(-1)
-  return message.role === "assistant" && last?.type === "tool-call" && last.providerExecuted === true
-}
-
-// Released updates always sit directly before an assistant turn or at the end, so only the preceding
-// turn decides whether they can be native system messages.
-const canUseNativeSystemUpdates = (previous: LLMRequest["messages"][number] | undefined) =>
-  previous !== undefined && (previous.role === "user" || previous.role === "tool" || endsInServerToolUse(previous))
+// Native system messages must follow a user turn (tool results count) or a paused server-tool turn.
+const acceptsNativeSystemAfter = (message: AnthropicMessage | undefined) =>
+  message?.role === "user" || (message?.role === "assistant" && message.content.at(-1)?.type === "server_tool_use")
 
 const splitsLocalToolResults = (messages: LLMRequest["messages"], index: number) => {
   const pending = new Set<string>()
@@ -849,32 +843,35 @@ const lowerNativeSystemUpdate = Effect.fn("AnthropicMessages.lowerNativeSystemUp
   }
 })
 
+const lowerWrappedSystemUpdate = Effect.fn("AnthropicMessages.lowerWrappedSystemUpdate")(function* (
+  message: LLMRequest["messages"][number],
+  breakpoints: Cache.Breakpoints,
+) {
+  const part = yield* ProviderShared.wrappedSystemUpdate("Anthropic Messages", message)
+  return { type: "text" as const, text: part.text, cache_control: cacheControl(breakpoints, part.cache) }
+})
+
+const appendToUserTurn = (messages: AnthropicMessage[], block: AnthropicUserBlock) => {
+  const last = messages.at(-1)
+  if (last?.role === "user") messages[messages.length - 1] = { role: "user", content: [...last.content, block] }
+  else messages.push({ role: "user", content: [block] })
+}
+
 const lowerMessages = Effect.fn("AnthropicMessages.lowerMessages")(function* (
   request: LLMRequest,
   breakpoints: Cache.Breakpoints,
 ) {
   const messages: AnthropicMessage[] = []
   const providerMetadataKey = request.model.route.providerMetadataKey ?? String(request.model.provider)
-  const native = supportsNativeSystemUpdates(request)
-  // Native system messages must follow a user turn and precede an assistant turn or end the request, so
-  // text updates wait for the next assistant turn and are released together as one system section.
+  // Updates wait for the next assistant turn so they land after the latest user turn, as one system section.
+  const holdUpdates = supportsNativeSystemUpdates(request)
   const held: Array<LLMRequest["messages"][number]> = []
-  let lastTurn: LLMRequest["messages"][number] | undefined
-  const wrapSystemUpdate = Effect.fnUntraced(function* (message: LLMRequest["messages"][number]) {
-    const part = yield* ProviderShared.wrappedSystemUpdate("Anthropic Messages", message)
-    const block = { type: "text" as const, text: part.text, cache_control: cacheControl(breakpoints, part.cache) }
-    const last = messages.at(-1)
-    if (last?.role === "user") messages[messages.length - 1] = { role: "user", content: [...last.content, block] }
-    else messages.push({ role: "user", content: [block] })
-  })
-  const releaseSystemUpdates = Effect.fnUntraced(function* () {
-    const updates = held.splice(0)
-    if (updates.length === 0) return
-    if (canUseNativeSystemUpdates(lastTurn)) {
-      for (const update of updates) messages.push(yield* lowerNativeSystemUpdate(update, breakpoints))
-      return
+  const releaseHeld = Effect.fnUntraced(function* () {
+    const native = acceptsNativeSystemAfter(messages.findLast((message) => message.role !== "system"))
+    for (const update of held.splice(0)) {
+      if (native) messages.push(yield* lowerNativeSystemUpdate(update, breakpoints))
+      else appendToUserTurn(messages, yield* lowerWrappedSystemUpdate(update, breakpoints))
     }
-    for (const update of updates) yield* wrapSystemUpdate(update)
   })
 
   for (const [index, message] of request.messages.entries()) {
@@ -887,8 +884,8 @@ const lowerMessages = Effect.fn("AnthropicMessages.lowerMessages")(function* (
       }
       if (splitsLocalToolResults(request.messages, index))
         return yield* invalid("Anthropic Messages system updates cannot split a local tool call from its tool result")
-      if (native) held.push(message)
-      else yield* wrapSystemUpdate(message)
+      if (holdUpdates) held.push(message)
+      else appendToUserTurn(messages, yield* lowerWrappedSystemUpdate(message, breakpoints))
       continue
     }
 
@@ -906,9 +903,7 @@ const lowerMessages = Effect.fn("AnthropicMessages.lowerMessages")(function* (
         }
         return yield* ProviderShared.unsupportedContent("Anthropic Messages", "user", ["text", "media"])
       }
-      if (content.length === 0) continue
-      messages.push({ role: "user", content })
-      lastTurn = message
+      if (content.length > 0) messages.push({ role: "user", content })
       continue
     }
 
@@ -967,9 +962,8 @@ const lowerMessages = Effect.fn("AnthropicMessages.lowerMessages")(function* (
         )
       }
       if (content.length === 0) continue
-      yield* releaseSystemUpdates()
+      yield* releaseHeld()
       messages.push({ role: "assistant", content })
-      lastTurn = message
       continue
     }
 
@@ -985,13 +979,12 @@ const lowerMessages = Effect.fn("AnthropicMessages.lowerMessages")(function* (
         cache_control: cacheControl(breakpoints, part.cache),
       })
     }
-    const last = messages.at(-1)
-    if (last?.role === "user" && last.content.every((block) => block.type === "tool_result"))
-      messages[messages.length - 1] = { role: "user", content: [...last.content, ...content] }
+    const previous = messages.at(-1)
+    if (previous?.role === "user" && previous.content.every((block) => block.type === "tool_result"))
+      messages[messages.length - 1] = { role: "user", content: [...previous.content, ...content] }
     else messages.push({ role: "user", content })
-    lastTurn = message
   }
-  yield* releaseSystemUpdates()
+  yield* releaseHeld()
 
   return messages
 })
