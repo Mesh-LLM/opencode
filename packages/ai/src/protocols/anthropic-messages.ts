@@ -863,7 +863,8 @@ const lowerMessages = Effect.fn("AnthropicMessages.lowerMessages")(function* (
 ) {
   const messages: AnthropicMessage[] = []
   const providerMetadataKey = request.model.route.providerMetadataKey ?? String(request.model.provider)
-  // Updates wait for the next assistant turn so they land after the latest user turn, as one system section.
+  // Text updates stay where they are unless a user turn follows them; then they move after the latest
+  // user turn, the nearest spot where Anthropic accepts a native system message.
   const holdUpdates = supportsNativeSystemUpdates(request)
   const held: Array<LLMRequest["messages"][number]> = []
   const releaseHeld = Effect.fnUntraced(function* () {
