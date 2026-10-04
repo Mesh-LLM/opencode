@@ -315,22 +315,22 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
       ],
       ([options, query, current], previous) => {
         if (!props.search) return
-        const queried = previous !== undefined && query !== previous[1]
-        const focused = current !== undefined && (previous === undefined || !isDeepEqual(current, previous[2]))
+        const queryChanged = previous !== undefined && query !== previous[1]
+        const currentChanged = current !== undefined && (previous === undefined || !isDeepEqual(current, previous[2]))
         selection = intent()
-        const kept = selection
-        const index = kept ? options.findIndex((option) => isDeepEqual(option.value, kept.value)) : -1
+        const intended = selection
+        const index = intended ? options.findIndex((option) => isDeepEqual(option.value, intended.value)) : -1
         const next = index >= 0 ? index : reconcileSelection(store.selected, options.length)
         const option = options[next]
         if (!option) return
         setStore("selected", next)
         selection = option
-        scrollAfterLayout(queried || focused, option.value)
+        scrollAfterLayout(queryChanged || currentChanged, option.value)
 
         function intent() {
-          if (queried && query) return options[0]
-          if ((queried || focused) && current !== undefined) return { value: current }
-          if (queried) return options[reconcileSelection(store.selected, options.length)]
+          if (queryChanged && query) return options[0]
+          if ((queryChanged || currentChanged) && current !== undefined) return { value: current }
+          if (queryChanged) return options[reconcileSelection(store.selected, options.length)]
           return selection
         }
       },

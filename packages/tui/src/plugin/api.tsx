@@ -385,16 +385,16 @@ export function createDialogApi(
                     options.options.filter((option) => !option.disabled),
                   ))
               }
-              actions={options.shortcuts?.map((shortcut, index) => {
-                const action = {
+              actions={options.actions?.map((action, index) => {
+                const base = {
                   command: `plugin.dialog.select.${id}.${index}`,
-                  title: shortcut.title,
-                  side: shortcut.side,
-                  bind: shortcut.key,
+                  title: action.title,
+                  side: action.side,
+                  bind: action.bind,
                 }
-                if (shortcut.selection === "none")
-                  return { ...action, selection: shortcut.selection, onTrigger: shortcut.onTrigger }
-                return { ...action, onTrigger: (option) => shortcut.onTrigger(option.value) }
+                if (action.selection === "none")
+                  return { ...base, selection: action.selection, onTrigger: action.onTrigger }
+                return { ...base, onTrigger: (option) => action.onTrigger(option.value) }
               })}
               onSelect={(option) => {
                 done(option.value)

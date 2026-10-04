@@ -183,7 +183,7 @@ test("search ignores disabled records returned by the callback", async () => {
       title: "Guarded",
       options: [{ title: "Alpha", value: "alpha" }],
       search: (_, options) => [hidden, ...options],
-      shortcuts: [{ key: "ctrl+o", title: "Inspect", onTrigger: (value) => triggered.push(value) }],
+      actions: [{ bind: "ctrl+o", title: "Inspect", onTrigger: (value) => triggered.push(value) }],
     })
     await opened(select.app, "Guarded")
     expect(select.app.captureCharFrame()).not.toContain("Hidden")
@@ -264,7 +264,7 @@ test.each([
   [false, true],
   [0, 1],
   ["", "other"],
-])("shortcuts deliver the selected value %p from keyboard, footer click, and footer focus", async (value, other) => {
+])("actions deliver the selected value %p from keyboard, footer click, and footer focus", async (value, other) => {
   await using tmp = await tmpdir()
   const select = await mount(tmp.path)
   const triggered: unknown[] = []
@@ -276,7 +276,7 @@ test.each([
         { title: "Chosen", value },
         { title: "Other", value: other },
       ],
-      shortcuts: [{ key: "ctrl+o", title: "Inspect", onTrigger: (selected) => triggered.push(selected) }],
+      actions: [{ bind: "ctrl+o", title: "Inspect", onTrigger: (selected) => triggered.push(selected) }],
     })
     void chosen.then(() => (settled = true))
     await opened(select.app, "Values")
@@ -299,7 +299,7 @@ test.each([
   }
 })
 
-test("shortcuts receive object values and unbind when the dialog closes", async () => {
+test("actions receive object values and unbind when the dialog closes", async () => {
   await using tmp = await tmpdir()
   const select = await mount(tmp.path)
   const project = { id: "acme" }
@@ -308,7 +308,7 @@ test("shortcuts receive object values and unbind when the dialog closes", async 
     const chosen = select.dialog.select({
       title: "Objects",
       options: [{ title: "Acme", value: project }],
-      shortcuts: [{ key: "ctrl+o", title: "Inspect", onTrigger: (selected) => triggered.push(selected) }],
+      actions: [{ bind: "ctrl+o", title: "Inspect", onTrigger: (selected) => triggered.push(selected) }],
     })
     await opened(select.app, "Objects")
     select.app.mockInput.pressKey("o", { ctrl: true })
@@ -324,7 +324,7 @@ test("shortcuts receive object values and unbind when the dialog closes", async 
   }
 })
 
-test("only no-selection shortcuts run without results", async () => {
+test("only no-selection actions run without results", async () => {
   await using tmp = await tmpdir()
   const select = await mount(tmp.path)
   const triggered: string[] = []
@@ -333,9 +333,9 @@ test("only no-selection shortcuts run without results", async () => {
       title: "Empty",
       options: [{ title: "Alpha", value: "alpha" }],
       search: () => [],
-      shortcuts: [
-        { key: "ctrl+o", title: "Inspect", onTrigger: (value) => triggered.push(value) },
-        { key: "ctrl+a", title: "New", side: "right", selection: "none", onTrigger: () => triggered.push("new") },
+      actions: [
+        { bind: "ctrl+o", title: "Inspect", onTrigger: (value) => triggered.push(value) },
+        { bind: "ctrl+a", title: "New", side: "right", selection: "none", onTrigger: () => triggered.push("new") },
       ],
     })
     await opened(select.app, "Empty")
@@ -349,7 +349,7 @@ test("only no-selection shortcuts run without results", async () => {
   }
 })
 
-test("a shortcut that opens a replacement dialog settles the select and keeps the replacement", async () => {
+test("an action that opens a replacement dialog settles the select and keeps the replacement", async () => {
   await using tmp = await tmpdir()
   const select = await mount(tmp.path)
   const triggered: string[] = []
@@ -357,9 +357,9 @@ test("a shortcut that opens a replacement dialog settles the select and keeps th
     const chosen = select.dialog.select({
       title: "Projects",
       options: [{ title: "Alpha", value: "alpha" }],
-      shortcuts: [
+      actions: [
         {
-          key: "ctrl+o",
+          bind: "ctrl+o",
           title: "Rename",
           onTrigger: (value) => {
             triggered.push(value)

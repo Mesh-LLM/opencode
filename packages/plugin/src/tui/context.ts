@@ -361,8 +361,8 @@ export interface DialogSelectOption<Value> {
   readonly disabled?: boolean
 }
 
-export type DialogSelectShortcut<Value> = {
-  readonly key: string
+export type DialogSelectAction<Value> = {
+  readonly bind: string
   readonly title: string
   readonly side?: "left" | "right"
 } & (
@@ -387,8 +387,8 @@ export interface DialogSelectOptions<Value> {
     query: string,
     options: readonly DialogSelectOption<Value>[],
   ) => readonly DialogSelectOption<Value>[]
-  /** Modal shortcuts shown in the footer. Triggering one does not close the dialog. */
-  readonly shortcuts?: readonly DialogSelectShortcut<Value>[]
+  /** Footer actions, also triggered by their bindings. Triggering one does not close the dialog. */
+  readonly actions?: readonly DialogSelectAction<Value>[]
 }
 
 export interface Dialog {
